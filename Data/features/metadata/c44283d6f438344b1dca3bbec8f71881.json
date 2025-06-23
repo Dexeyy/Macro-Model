@@ -1,0 +1,87 @@
+{
+  "feature_id": "c44283d6f438344b1dca3bbec8f71881",
+  "feature_name": "asset_returns",
+  "feature_type": "asset",
+  "version": "2.0.0",
+  "description": "Enhanced asset returns with VIX",
+  "created_at": "2025-06-19T18:44:17.834020+00:00",
+  "data_shape": [
+    100,
+    4
+  ],
+  "data_columns": [
+    "SPY_return",
+    "TLT_return",
+    "GLD_return",
+    "VIX_return"
+  ],
+  "data_types": {
+    "SPY_return": "float64",
+    "TLT_return": "float64",
+    "GLD_return": "float64",
+    "VIX_return": "float64"
+  },
+  "file_path": "Data\\features\\engineered\\asset\\c44283d6f438344b1dca3bbec8f71881.pkl",
+  "file_size_bytes": 3961,
+  "metadata": {},
+  "tags": [
+    "returns",
+    "daily",
+    "assets",
+    "volatility"
+  ],
+  "schema_hash": "f925461b188d5c16fb949036fe3e57ff",
+  "statistics": {
+    "row_count": 100,
+    "column_count": 4,
+    "null_counts": {
+      "SPY_return": 0,
+      "TLT_return": 0,
+      "GLD_return": 0,
+      "VIX_return": 0
+    },
+    "memory_usage_bytes": 3332,
+    "numeric_summary": {
+      "SPY_return": {
+        "count": 100.0,
+        "mean": -0.0001755506881897598,
+        "std": 0.02034161392394807,
+        "min": -0.04762523271071879,
+        "25%": -0.01407950639875915,
+        "50%": -0.0007262591975696214,
+        "75%": 0.01316754315086256,
+        "max": 0.06033438575485779
+      },
+      "TLT_return": {
+        "count": 100.0,
+        "mean": 0.0018319405688794724,
+        "std": 0.014514807886056772,
+        "min": -0.029713995051918515,
+        "25%": -0.006902578996958794,
+        "50%": 0.0022413421571814895,
+        "75%": 0.011500761788678641,
+        "max": 0.04694966257637996
+      },
+      "GLD_return": {
+        "count": 100.0,
+        "mean": -0.0017512024375872948,
+        "std": 0.023293568216055924,
+        "min": -0.052591617098355484,
+        "25%": -0.01703114413497781,
+        "50%": -0.0018536658328345609,
+        "75%": 0.014488123214489237,
+        "max": 0.06048138716633709
+      },
+      "VIX_return": {
+        "count": 100.0,
+        "mean": -0.0041746737600819395,
+        "std": 0.04821209351566018,
+        "min": -0.1125257618592259,
+        "25%": -0.040427347156442986,
+        "50%": -0.0008607539650603057,
+        "75%": 0.029514239757104814,
+        "max": 0.13353496542554463
+      }
+    }
+  }
+}

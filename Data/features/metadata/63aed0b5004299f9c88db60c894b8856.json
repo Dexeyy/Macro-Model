@@ -1,0 +1,73 @@
+{
+  "feature_id": "63aed0b5004299f9c88db60c894b8856",
+  "feature_name": "macro_indicators",
+  "feature_type": "macro",
+  "version": "1.0.0",
+  "description": "Key macroeconomic indicators",
+  "created_at": "2025-06-19T18:44:17.794861+00:00",
+  "data_shape": [
+    100,
+    3
+  ],
+  "data_columns": [
+    "GDP_growth",
+    "inflation_rate",
+    "unemployment"
+  ],
+  "data_types": {
+    "GDP_growth": "float64",
+    "inflation_rate": "float64",
+    "unemployment": "float64"
+  },
+  "file_path": "Data\\features\\engineered\\macro\\63aed0b5004299f9c88db60c894b8856.pkl",
+  "file_size_bytes": 3099,
+  "metadata": {},
+  "tags": [
+    "macro",
+    "economic",
+    "indicators"
+  ],
+  "schema_hash": "7908ef3c4f2fc03f87c12e5cb9a51de5",
+  "statistics": {
+    "row_count": 100,
+    "column_count": 3,
+    "null_counts": {
+      "GDP_growth": 0,
+      "inflation_rate": 0,
+      "unemployment": 0
+    },
+    "memory_usage_bytes": 2532,
+    "numeric_summary": {
+      "GDP_growth": {
+        "count": 100.0,
+        "mean": 0.018429787701398165,
+        "std": 0.009399180433993262,
+        "min": -0.0023872192625904766,
+        "25%": 0.011500329767480763,
+        "50%": 0.018626220769374514,
+        "75%": 0.026925160426103545,
+        "max": 0.03598223435300216
+      },
+      "inflation_rate": {
+        "count": 100.0,
+        "mean": 0.02540659257799703,
+        "std": 0.005072337528544271,
+        "min": 0.011867068931061472,
+        "25%": 0.022218094029947396,
+        "50%": 0.024923496692344085,
+        "75%": 0.02935929441676,
+        "max": 0.03669715244447398
+      },
+      "unemployment": {
+        "count": 100.0,
+        "mean": 0.05124112431823673,
+        "std": 0.01123907529971999,
+        "min": 0.02761002404498492,
+        "25%": 0.043287484341942455,
+        "50%": 0.05176333052085455,
+        "75%": 0.05874246958591908,
+        "max": 0.07968653371303398
+      }
+    }
+  }
+}

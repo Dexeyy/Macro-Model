@@ -1,0 +1,19 @@
+{
+  "created_at": "2025-06-19T18:34:26.628369+00:00",
+  "last_cleanup": "2025-06-19T18:34:26.648466+00:00",
+  "cache_entries": {
+    "a711e0c264b5544682acca4dca9d4242": {
+      "data_identifier": "test_data_sample",
+      "created_at": "2025-06-19T18:34:26.640405+00:00",
+      "expires_at": "2025-06-19T19:34:26.640415+00:00",
+      "file_size_bytes": 1735,
+      "access_count": 0
+    }
+  },
+  "statistics": {
+    "total_entries": 1,
+    "total_size_bytes": 1735,
+    "cache_hits": 1,
+    "cache_misses": 1
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "feature_id": "e6e9fe61880a114623c8d5e806942c2f",
+  "feature_name": "asset_returns",
+  "feature_type": "asset",
+  "version": "1.0.0",
+  "description": "Daily asset returns for SPY, TLT, GLD",
+  "created_at": "2025-06-19T18:44:17.777209+00:00",
+  "data_shape": [
+    100,
+    3
+  ],
+  "data_columns": [
+    "SPY_return",
+    "TLT_return",
+    "GLD_return"
+  ],
+  "data_types": {
+    "SPY_return": "float64",
+    "TLT_return": "float64",
+    "GLD_return": "float64"
+  },
+  "file_path": "Data\\features\\engineered\\asset\\e6e9fe61880a114623c8d5e806942c2f.pkl",
+  "file_size_bytes": 3093,
+  "metadata": {},
+  "tags": [
+    "returns",
+    "daily",
+    "assets"
+  ],
+  "schema_hash": "c8e543c551aa50dca799d34a5fe465cf",
+  "statistics": {
+    "row_count": 100,
+    "column_count": 3,
+    "null_counts": {
+      "SPY_return": 0,
+      "TLT_return": 0,
+      "GLD_return": 0
+    },
+    "memory_usage_bytes": 2532,
+    "numeric_summary": {
+      "SPY_return": {
+        "count": 100.0,
+        "mean": -0.0001755506881897598,
+        "std": 0.02034161392394807,
+        "min": -0.04762523271071879,
+        "25%": -0.01407950639875915,
+        "50%": -0.0007262591975696214,
+        "75%": 0.01316754315086256,
+        "max": 0.06033438575485779
+      },
+      "TLT_return": {
+        "count": 100.0,
+        "mean": 0.0018319405688794724,
+        "std": 0.014514807886056772,
+        "min": -0.029713995051918515,
+        "25%": -0.006902578996958794,
+        "50%": 0.0022413421571814895,
+        "75%": 0.011500761788678641,
+        "max": 0.04694966257637996
+      },
+      "GLD_return": {
+        "count": 100.0,
+        "mean": -0.0017512024375872948,
+        "std": 0.023293568216055924,
+        "min": -0.052591617098355484,
+        "25%": -0.01703114413497781,
+        "50%": -0.0018536658328345609,
+        "75%": 0.014488123214489237,
+        "max": 0.06048138716633709
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "feature_id": "7bb0420ba7c80d1fa92534e5ed0b6947",
+  "feature_name": "asset_returns",
+  "feature_type": "asset",
+  "version": "1.0.0",
+  "description": "Daily asset returns for SPY, TLT, GLD",
+  "created_at": "2025-06-19T18:43:26.676083+00:00",
+  "data_shape": [
+    100,
+    3
+  ],
+  "data_columns": [
+    "SPY_return",
+    "TLT_return",
+    "GLD_return"
+  ],
+  "data_types": {
+    "SPY_return": "float64",
+    "TLT_return": "float64",
+    "GLD_return": "float64"
+  },
+  "file_path": "Data\\features\\engineered\\asset\\7bb0420ba7c80d1fa92534e5ed0b6947.pkl",
+  "file_size_bytes": 3093,
+  "metadata": {},
+  "tags": [
+    "returns",
+    "daily",
+    "assets"
+  ],
+  "schema_hash": "c8e543c551aa50dca799d34a5fe465cf",
+  "statistics": {
+    "row_count": 100,
+    "column_count": 3,
+    "null_counts": {
+      "SPY_return": 0,
+      "TLT_return": 0,
+      "GLD_return": 0
+    },
+    "memory_usage_bytes": 

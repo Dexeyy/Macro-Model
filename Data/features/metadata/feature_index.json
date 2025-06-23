@@ -1,0 +1,79 @@
+{
+  "created_at": "2025-06-19T18:43:26.673275+00:00",
+  "version": "1.0.0",
+  "features": {
+    "e6e9fe61880a114623c8d5e806942c2f": {
+      "feature_name": "asset_returns",
+      "feature_type": "asset",
+      "version": "1.0.0",
+      "description": "Daily asset returns for SPY, TLT, GLD",
+      "created_at": "2025-06-19T18:44:17.777209+00:00",
+      "data_shape": [
+        100,
+        3
+      ],
+      "file_size_bytes": 3093,
+      "tags": [
+        "returns",
+        "daily",
+        "assets"
+      ],
+      "schema_hash": "c8e543c551aa50dca799d34a5fe465cf"
+    },
+    "63aed0b5004299f9c88db60c894b8856": {
+      "feature_name": "macro_indicators",
+      "feature_type": "macro",
+      "version": "1.0.0",
+      "description": "Key macroeconomic indicators",
+      "created_at": "2025-06-19T18:44:17.794861+00:00",
+      "data_shape": [
+        100,
+        3
+      ],
+      "file_size_bytes": 3099,
+      "tags": [
+        "macro",
+        "economic",
+        "indicators"
+      ],
+      "schema_hash": "7908ef3c4f2fc03f87c12e5cb9a51de5"
+    },
+    "c44283d6f438344b1dca3bbec8f71881": {
+      "feature_name": "asset_returns",
+      "feature_type": "asset",
+      "version": "2.0.0",
+      "description": "Enhanced asset returns with VIX",
+      "created_at": "2025-06-19T18:44:17.834020+00:00",
+      "data_shape": [
+        100,
+        4
+      ],
+      "file_size_bytes": 3961,
+      "tags": [
+        "returns",
+        "daily",
+        "assets",
+        "volatility"
+      ],
+      "schema_hash": "f925461b188d5c16fb949036fe3e57ff"
+    }
+  },
+  "feature_groups": {
+    "group_d6f91c12": {
+      "group_id": "group_d6f91c12",
+      "group_name": "macro_asset_group",
+      "description": "Combined macro and asset features for regime analysis",
+      "features": [
+        "asset_returns",
+        "macro_indicators"
+      ],
+      "created_at": "2025-06-19T18:44:17.870425+00:00",
+      "metadata": {}
+    }
+  },
+  "statistics": {
+    "total_features": 3,
+    "total_versions": 2,
+    "storage_size_bytes": 10153
+  }
+}
