@@ -8,7 +8,9 @@ simulation, walk-forward optimization, and stress testing.
 
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+# Add the project root directory to Python path
+project_root = os.path.dirname(os.path.dirname(__file__))
+sys.path.append(os.path.join(project_root, 'src'))
 
 import pandas as pd
 import numpy as np
