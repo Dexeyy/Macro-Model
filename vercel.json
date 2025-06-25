@@ -1,8 +1,0 @@
-{
-  "projects": {
-    "default": {
-      "framework": "nextjs",
-      "rootDirectory": "ui"
-    }
-  }
-} 
