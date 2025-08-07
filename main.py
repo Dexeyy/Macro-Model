@@ -22,15 +22,7 @@ from src.data.processors import (
     calculate_regime_performance,
     create_advanced_features
 )
-from src.models.regime_classifier import (
-    apply_rule_based_classification,
-    apply_kmeans_classification,
-    map_kmeans_to_labels,
-    apply_hmm_classification,
-    apply_markov_switching,
-    apply_dynamic_factor_model,
-    apply_ensemble_classification
-)
+from src.models.regime_classifier import fit_regimes
 from src.models.portfolio import (
     create_equal_weight_portfolio,
     create_regime_based_portfolio,
@@ -68,8 +60,10 @@ def fetch_and_process_data():
     # Fetch macro data from FRED
     try:
         logger.info("Fetching macro data from FRED...")
+        # ensure we pass mapping label->code without spaces
+        fred_series_dict = {code: code for code in config.FRED_SERIES.keys()}
         macro_data_raw = fetch_fred_series(
-            config.FRED_SERIES,
+            fred_series_dict,
             config.START_DATE,
             config.END_DATE
         )
@@ -150,77 +144,15 @@ def classify_regimes(macro_data):
         logger.error("No macro data available for regime classification")
         return None
     
-    # Apply rule-based classification
+    # Run unified multi-model regime fitting
     try:
-        logger.info("Applying rule-based regime classification...")
-        macro_data = apply_rule_based_classification(macro_data)
+        from src.models.regime_classifier import fit_regimes
+        regime_df = fit_regimes(macro_data, features=config.CLUSTER_FEATURES, n_regimes=4)
+        macro_data = macro_data.join(regime_df, how="left")
     except Exception as e:
-        logger.error(f"Error applying rule-based classification: {e}")
+        logger.error(f"Regime fitting failed: {e}")
     
-    # Apply K-means clustering
-    try:
-        logger.info("Applying K-means clustering...")
-        macro_data = apply_kmeans_classification(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_clusters=4
-        )
-        
-        # Map cluster numbers to meaningful labels
-        macro_data = map_kmeans_to_labels(macro_data)
-    except Exception as e:
-        logger.error(f"Error applying K-means classification: {e}")
-    
-    # Apply Hidden Markov Model classification
-    try:
-        logger.info("Applying Hidden Markov Model classification...")
-        macro_data = apply_hmm_classification(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_states=4
-        )
-    except Exception as e:
-        logger.error(f"Error applying HMM classification: {e}")
-    
-    # Apply Markov-Switching model
-    try:
-        logger.info("Applying Markov-Switching model...")
-        # Use GDP_YoY as the target feature if available
-        target_feature = 'GDP_YoY'
-        if target_feature in macro_data.columns:
-            macro_data = apply_markov_switching(
-                macro_data,
-                target_feature=target_feature,
-                k_regimes=3,
-                order=4
-            )
-        else:
-            logger.warning(f"Target feature {target_feature} not found for Markov-Switching model")
-    except Exception as e:
-        logger.error(f"Error applying Markov-Switching model: {e}")
-    
-    # Apply Dynamic Factor Model
-    try:
-        logger.info("Applying Dynamic Factor Model...")
-        macro_data = apply_dynamic_factor_model(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_factors=2,
-            factor_order=1
-        )
-    except Exception as e:
-        logger.error(f"Error applying Dynamic Factor Model: {e}")
-    
-    # Apply Ensemble Classification
-    try:
-        logger.info("Applying Ensemble Classification...")
-        # Use all available methods
-        macro_data = apply_ensemble_classification(
-            macro_data,
-            methods=None  # Use all available methods
-        )
-    except Exception as e:
-        logger.error(f"Error applying Ensemble Classification: {e}")
+
     
     # Save the classified data
     try:

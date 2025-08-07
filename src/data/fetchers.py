@@ -259,13 +259,28 @@ def process_asset_data(data, label):
             logger.info(f"Processing data for {label} with columns: {data.columns.tolist()}")
             
             # Choose the correct price column
-            if 'Adj Close' in data.columns:
-                price_series = data['Adj Close']
-                logger.info(f"Using 'Adj Close' column for {label}")
-            elif 'Close' in data.columns:
-                price_series = data['Close']
-                logger.info(f"Using 'Close' column for {label}")
+            # yahoo-finance now returns a MultiIndex (field,ticker) when you
+            # request multiple tickers in one call.  Handle both flat and
+            # MultiIndex cases gracefully.
+            if isinstance(data.columns, pd.MultiIndex):
+                if 'Adj Close' in data.columns.get_level_values(0):
+                    price_series = data.xs('Adj Close', level=0, axis=1).squeeze()
+                    logger.info(f"Using 'Adj Close' column (MultiIndex) for {label}")
+                elif 'Close' in data.columns.get_level_values(0):
+                    price_series = data.xs('Close', level=0, axis=1).squeeze()
+                    logger.info(f"Using 'Close' column (MultiIndex) for {label}")
+                else:
+                    price_series = None
             else:
+                if 'Adj Close' in data.columns:
+                    price_series = data['Adj Close']
+                    logger.info(f"Using 'Adj Close' column for {label}")
+                elif 'Close' in data.columns:
+                    price_series = data['Close']
+                    logger.info(f"Using 'Close' column for {label}")
+                else:
+                    price_series = None
+            if price_series is None:
                 # If no Adj Close or Close, use the first numeric column
                 numeric_cols = [col for col in data.columns if pd.api.types.is_numeric_dtype(data[col])]
                 if numeric_cols:

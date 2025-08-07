@@ -159,88 +159,72 @@ class LagAligner:
         self.aligned_data = pd.DataFrame(aligned_data_list)
         return self.aligned_data
 
-def process_macro_data(macro_data_raw):
+import os
+from config import config  # added import at top earlier
+
+def process_macro_data(macro_data_raw: pd.DataFrame) -> pd.DataFrame:
+    """Clean & enrich raw macro series.
+
+    Steps
+    -----
+    1.  Monthly resample (end-of-month).
+    2.  Compute *YoY* and *MoM* % changes for every **original** series listed in
+        ``config.FRED_SERIES`` that exists in the dataset.
+    3.  Rolling moving-averages (3- and 6-month) for every numeric column that
+        *already* contains a YoY or MoM value (to avoid averaging the raw price
+        levels of different scales).
+    4.  24-month rolling z-score for all numeric columns.
     """
-    Process raw macro data:
-    - Resample to monthly frequency
-    - Calculate YoY and MoM changes
-    - Calculate moving averages
-    - Calculate Z-scores
-    
-    Args:
-        macro_data_raw: Raw macro data from FRED
-        
-    Returns:
-        DataFrame with processed macro data
-    """
-    try:
-        # Resample to monthly frequency
-        macro_data_monthly = macro_data_raw.resample('M').last()
-        macro_data_monthly = macro_data_monthly.ffill()
-        
-        logger.info("Successfully resampled data to monthly frequency")
-        
-        # Calculate YoY and MoM changes
-        for col in ['CPI', 'CoreCPI', 'PPI', 'GDP', 'NFP', 'RetailSales', 'INDPRO', 'WageGrowth']:
-            if col in macro_data_monthly.columns:
-                try:
-                    macro_data_monthly[f'{col}_YoY'] = macro_data_monthly[col].pct_change(12) * 100
-                    macro_data_monthly[f'{col}_MoM'] = macro_data_monthly[col].pct_change(1) * 100
-                    logger.info(f"Successfully calculated changes for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating changes for {col}: {e}")
+    if macro_data_raw.empty:
+        raise ValueError("macro_data_raw is empty")
 
-        # Calculate GDP Gap
-        if 'GDP' in macro_data_monthly.columns and 'RealPotentialGDP' in macro_data_monthly.columns:
-            try:
-                macro_data_monthly['GDP_Gap'] = (
-                    (macro_data_monthly['GDP'] / macro_data_monthly['RealPotentialGDP']) - 1
-                ) * 100
-                logger.info("Successfully calculated GDP Gap")
-            except Exception as e:
-                logger.warning(f"Error calculating GDP Gap: {e}")
+    # ------------------------------------------------------------------
+    # 1. Resample to month-end and forward-fill
+    # ------------------------------------------------------------------
+    monthly = macro_data_raw.resample("M").last().ffill()
 
-        # Calculate moving averages
-        for col in ['UNRATE', 'CPI_YoY', 'UMCSENT']:
-            if col in macro_data_monthly.columns:
-                try:
-                    macro_data_monthly[f'{col}_3M_MA'] = macro_data_monthly[col].rolling(window=3, min_periods=1).mean()
-                    macro_data_monthly[f'{col}_6M_MA'] = macro_data_monthly[col].rolling(window=6, min_periods=1).mean()
-                    logger.info(f"Successfully calculated moving averages for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating moving averages for {col}: {e}")
+    # ------------------------------------------------------------------
+    # 2. YoY & MoM
+    # ------------------------------------------------------------------
+    for label in config.FRED_SERIES.keys():  # type: ignore
+        if label in monthly.columns:
+            monthly[f"{label}_YoY"] = monthly[label].pct_change(12) * 100
+            monthly[f"{label}_MoM"] = monthly[label].pct_change(1) * 100
 
-        # Calculate Z-scores
-        for col in macro_data_monthly.columns:
-            if pd.api.types.is_numeric_dtype(macro_data_monthly[col]):
-                try:
-                    rolling_mean = macro_data_monthly[col].rolling(window=24, min_periods=1).mean()
-                    rolling_std = macro_data_monthly[col].rolling(window=24, min_periods=1).std()
-                    
-                    # Safe division to handle zeros in std
-                    macro_data_monthly[f'{col}_ZScore'] = np.where(
-                        rolling_std != 0,
-                        (macro_data_monthly[col] - rolling_mean) / rolling_std,
-                        0
-                    )
-                    logger.info(f"Successfully calculated Z-score for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating Z-score for {col}: {e}")
+    # GDP Gap – keep legacy logic if both series present
+    if {"GDP", "RealPotentialGDP"}.issubset(monthly.columns):
+        monthly["GDP_Gap"] = (monthly["GDP"] / monthly["RealPotentialGDP"] - 1) * 100
 
-        # Drop NaNs
-        macro_data_featured = macro_data_monthly.dropna(
-            subset=[col for col in macro_data_monthly.columns if 'YoY' in col or 'MA' in col],
-            how='all'
-        )
-        
-        logger.info("Successfully created macro_data_featured")
-        return macro_data_featured
-    
-    except Exception as e:
-        logger.error(f"Error in data processing: {e}")
-        raise
+    # ------------------------------------------------------------------
+    # 3. Moving averages for rate/percentage series (YoY / MoM columns)
+    # ------------------------------------------------------------------
+    pct_cols = [c for c in monthly.columns if c.endswith("_YoY") or c.endswith("_MoM")]
+    for col in pct_cols:
+        monthly[f"{col}_3M_MA"] = monthly[col].rolling(3, min_periods=1).mean()
+        monthly[f"{col}_6M_MA"] = monthly[col].rolling(6, min_periods=1).mean()
 
-def create_advanced_features(data):
+    # ------------------------------------------------------------------
+    # 4. 24-month rolling z-score for all numeric columns
+    # ------------------------------------------------------------------
+    for col in monthly.columns:
+        if pd.api.types.is_numeric_dtype(monthly[col]):
+            mean24 = monthly[col].rolling(24, min_periods=1).mean()
+            std24 = monthly[col].rolling(24, min_periods=1).std()
+            monthly[f"{col}_ZScore"] = np.where(std24 != 0, (monthly[col] - mean24) / std24, 0)
+
+    # Provide simple aliases expected elsewhere in the codebase
+    alias_map = {
+        "CPI_YoY": "CPIAUCSL_YoY",
+        "GDP_YoY": "GDPC1_YoY",
+    }
+    for alias, source in alias_map.items():
+        if alias not in monthly.columns and source in monthly.columns:
+            monthly[alias] = monthly[source]
+
+    logger.info("process_macro_data: finished feature engineering (%d cols)", len(monthly.columns))
+    return monthly
+
+def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
     """
     Create advanced macroeconomic features for regime detection.
     
@@ -335,6 +319,15 @@ def create_advanced_features(data):
             except Exception as e:
                 logger.warning(f"Error creating M2 growth features: {e}")
         
+        # Persist combined dataset
+        try:
+            out_path = os.path.join("Data", "processed", "merged.parquet")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            result_data.to_parquet(out_path)
+            logger.info("Saved processed macro data to %s", out_path)
+        except Exception as exc:
+            logger.warning("Could not save parquet: %s", exc)
+
         logger.info("Successfully created advanced features")
         return result_data
         

@@ -584,7 +584,7 @@ def apply_rule_based_classification(data: pd.DataFrame, custom_rules: Optional[D
         classifier.set_custom_rules(custom_rules)
     return classifier.classify_regime(data)
 
-def apply_kmeans_classification(data: pd.DataFrame, n_clusters: int = 4) -> pd.Series:
+def apply_kmeans_classification(data: pd.DataFrame, n_clusters: int = 4, *, return_distance: bool = False):
     """
     Apply K-means clustering for regime classification.
     
@@ -601,14 +601,20 @@ def apply_kmeans_classification(data: pd.DataFrame, n_clusters: int = 4) -> pd.S
     # Scale the data
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(data)
-    
-    # Apply K-means
+
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     labels = kmeans.fit_predict(scaled_data)
-    
-    # Create regime labels
+
     regime_labels = pd.Series([f"Regime_{label}" for label in labels], index=data.index)
-    return regime_labels
+
+    if not return_distance:
+        return regime_labels
+
+    # distance to assigned centroid as simple confidence proxy (smaller = closer)
+    centroids = kmeans.cluster_centers_
+    dists = np.linalg.norm(scaled_data - centroids[labels], axis=1)
+    conf = pd.Series(dists, index=data.index, name="KMeans_conf")
+    return regime_labels, conf
 
 def map_kmeans_to_labels(regime_series: pd.Series, mapping: Dict[str, str]) -> pd.Series:
     """
@@ -623,7 +629,7 @@ def map_kmeans_to_labels(regime_series: pd.Series, mapping: Dict[str, str]) -> p
     """
     return regime_series.map(mapping)
 
-def apply_hmm_classification(data: pd.DataFrame, n_regimes: int = 4) -> pd.Series:
+def apply_hmm_classification(data: pd.DataFrame, n_regimes: int = 4, *, return_prob: bool = False):
     """
     Apply Hidden Markov Model for regime classification.
     
@@ -638,17 +644,22 @@ def apply_hmm_classification(data: pd.DataFrame, n_regimes: int = 4) -> pd.Serie
         from hmmlearn import hmm
         from sklearn.preprocessing import StandardScaler
         
-        # Scale the data
         scaler = StandardScaler()
         scaled_data = scaler.fit_transform(data)
-        
-        # Apply HMM
+
         hmm_model = hmm.GaussianHMM(n_components=n_regimes, random_state=42)
         labels = hmm_model.fit_predict(scaled_data)
-        
-        # Create regime labels
         regime_labels = pd.Series([f"Regime_{label}" for label in labels], index=data.index)
-        return regime_labels
+
+        if not return_prob:
+            return regime_labels
+
+        # posterior probabilities of assigned state
+        post = hmm_model.predict_proba(scaled_data)
+        idx = np.arange(len(labels))
+        prob = post[idx, labels]
+        conf = pd.Series(prob, index=data.index, name="HMM_conf")
+        return regime_labels, conf
     except ImportError:
         # Fallback to K-means if hmmlearn is not available
         return apply_kmeans_classification(data, n_regimes)
@@ -686,6 +697,51 @@ def apply_dynamic_factor_model(data: pd.DataFrame, n_factors: int = 3) -> pd.Ser
     
     # Apply K-means to the factors
     return apply_kmeans_classification(pd.DataFrame(factors, index=data.index), n_clusters=4)
+
+def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes: int = 4) -> pd.DataFrame:
+    """Generate three parallel regime labels + confidence + ensemble."""
+    # Select only feature columns if provided
+    feature_df = data[features] if features is not None else data.select_dtypes("number").dropna(axis=1, how="any")
+
+    labels_rule, rule_conf = apply_rule_based_classification(data), None
+    if hasattr(RuleBasedRegimeClassifier, "_calculate_regime_score"):
+        # if classifier provides scores vectorised inside classify function we might retrieve; fallback None
+        pass
+
+    km_res = apply_kmeans_classification(feature_df, n_clusters=n_regimes, return_distance=True)
+    labels_km, km_conf = km_res
+
+    hmm_res = apply_hmm_classification(feature_df, n_regimes=n_regimes, return_prob=True)
+    if isinstance(hmm_res, tuple):
+        labels_hmm, hmm_conf = hmm_res
+    else:
+        labels_hmm, hmm_conf = hmm_res, None
+
+    # Majority vote ensemble
+    vote_df = pd.concat({"Rule": labels_rule, "KMeans": labels_km, "HMM": labels_hmm}, axis=1)
+    def _vote(row):
+        vc = row.value_counts()
+        if vc.empty:
+            return np.nan
+        if vc.iloc[0] > 1:
+            return vc.index[0]
+        return row["HMM"]
+    ensemble = vote_df.apply(_vote, axis=1)
+
+    out = pd.concat({
+        "Rule": labels_rule,
+        "KMeans": labels_km,
+        "HMM": labels_hmm,
+        "Regime_Ensemble": ensemble
+    }, axis=1)
+    # append confidences if available
+    if rule_conf is not None:
+        out["Rule_conf"] = rule_conf
+    if km_conf is not None:
+        out["KMeans_conf"] = km_conf
+    if hmm_conf is not None:
+        out["HMM_conf"] = hmm_conf
+    return out
 
 def apply_ensemble_classification(data: pd.DataFrame, methods: List[str] = None) -> pd.Series:
     """
