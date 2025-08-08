@@ -282,15 +282,15 @@ def process_asset_data(data, label):
                 
             logger.info(f"Price series for {label} before cleaning: length={len(price_series)}, non-null={price_series.count()}")
             
-            # Forward fill any missing values
-            price_series = price_series.fillna(method='ffill')
+            # Forward fill any missing values (use .ffill() to avoid deprecation)
+            price_series = price_series.ffill()
             
             # Check if we still have nulls
             null_count = price_series.isnull().sum()
             if null_count > 0:
                 logger.warning(f"After forward fill, {label} still has {null_count} nulls")
                 # Try backward fill as well
-                price_series = price_series.fillna(method='bfill')
+                price_series = price_series.bfill()
                 null_count = price_series.isnull().sum()
                 if null_count > 0:
                     logger.warning(f"After backward fill, {label} still has {null_count} nulls")

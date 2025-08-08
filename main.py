@@ -42,6 +42,7 @@ from src.visualization.plots import (
     plot_regime_feature_distribution,
     plot_regime_transitions
 )
+from src.models.performance_analytics import PerformanceAnalytics
 from src.utils.helpers import (
     validate_dataframe,
     diagnose_dataframe,
@@ -244,8 +245,9 @@ def analyze_regime_performance(macro_data, asset_returns):
     
     results = {}
     
-    # Analyze for both rule-based and K-means regimes
-    for regime_col in ['Regime_Rule_Based', 'Regime_KMeans_Labeled']:
+    # Analyze for available regimes in the unified output (Rule/HMM/KMeans/Regime_Ensemble)
+    candidate_cols = [c for c in ['Rule', 'HMM', 'KMeans', 'Regime_Ensemble', 'Regime_Rule_Based', 'Regime_KMeans_Labeled'] if c in macro_data.columns]
+    for regime_col in candidate_cols:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
             continue
@@ -291,6 +293,18 @@ def analyze_regime_performance(macro_data, asset_returns):
             logger.error(f"Error analyzing performance for {regime_col}: {e}")
     
     logger.info("Regime performance analysis completed")
+
+    # Build and save regime scorecard diagnostics
+    try:
+        if asset_returns is not None and macro_data is not None and results:
+            regime_series_dict = {}
+            for col in [c for c in macro_data.columns if c in ("HMM", "GMM", "KMeans", "Rule", "Regime_Ensemble")]:
+                regime_series_dict[col] = macro_data[col]
+            if regime_series_dict:
+                analyzer = PerformanceAnalytics()
+                analyzer.build_regime_scorecard(asset_returns, regime_series_dict)
+    except Exception as exc:
+        logger.warning(f"Failed to build regime scorecard: {exc}")
     return results
 
 def create_visualizations(macro_data, analysis_results):
@@ -301,8 +315,8 @@ def create_visualizations(macro_data, analysis_results):
         logger.error("No macro data available for visualizations")
         return
     
-    # Create regime timeline plots
-    for regime_col in ['Regime_Rule_Based', 'Regime_KMeans_Labeled']:
+    # Create regime timeline plots for available columns
+    for regime_col in [c for c in ['Rule', 'HMM', 'KMeans', 'Regime_Ensemble', 'Regime_Rule_Based', 'Regime_KMeans_Labeled'] if c in macro_data.columns]:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
             continue

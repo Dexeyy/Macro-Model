@@ -159,7 +159,30 @@ class LagAligner:
         self.aligned_data = pd.DataFrame(aligned_data_list)
         return self.aligned_data
 
+<<<<<<< Updated upstream
 def process_macro_data(macro_data_raw):
+=======
+import os
+from config import config  # added import at top earlier
+from src.utils.contracts import validate_frame, ProcessedMacroFrame, PerformanceFrame
+from src.excel.excel_live import group_features
+from src.features.economic_indicators import build_theme_composites
+from src.features.pca_factors import fit_theme_pca
+from src.utils.helpers import load_yaml_config
+
+def process_macro_data(macro_data_raw: pd.DataFrame) -> pd.DataFrame:
+    """Clean & enrich raw macro series.
+
+    Steps
+    -----
+    1.  Monthly resample (end-of-month).
+    2.  Compute *YoY* and *MoM* % changes for every **original** series listed in
+        ``config.FRED_SERIES`` that exists in the dataset.
+    3.  Rolling moving-averages (3- and 6-month) for every numeric column that
+        *already* contains a YoY or MoM value (to avoid averaging the raw price
+        levels of different scales).
+    4.  24-month rolling z-score for all numeric columns.
+>>>>>>> Stashed changes
     """
     Process raw macro data:
     - Resample to monthly frequency
@@ -190,6 +213,7 @@ def process_macro_data(macro_data_raw):
                 except Exception as e:
                     logger.warning(f"Error calculating changes for {col}: {e}")
 
+<<<<<<< Updated upstream
         # Calculate GDP Gap
         if 'GDP' in macro_data_monthly.columns and 'RealPotentialGDP' in macro_data_monthly.columns:
             try:
@@ -199,6 +223,12 @@ def process_macro_data(macro_data_raw):
                 logger.info("Successfully calculated GDP Gap")
             except Exception as e:
                 logger.warning(f"Error calculating GDP Gap: {e}")
+=======
+    # ------------------------------------------------------------------
+    # 1. Resample to month-end and forward-fill
+    # ------------------------------------------------------------------
+    monthly = macro_data_raw.resample("ME").last().ffill()
+>>>>>>> Stashed changes
 
         # Calculate moving averages
         for col in ['UNRATE', 'CPI_YoY', 'UMCSENT']:
@@ -227,6 +257,7 @@ def process_macro_data(macro_data_raw):
                 except Exception as e:
                     logger.warning(f"Error calculating Z-score for {col}: {e}")
 
+<<<<<<< Updated upstream
         # Drop NaNs
         macro_data_featured = macro_data_monthly.dropna(
             subset=[col for col in macro_data_monthly.columns if 'YoY' in col or 'MA' in col],
@@ -241,6 +272,103 @@ def process_macro_data(macro_data_raw):
         raise
 
 def create_advanced_features(data):
+=======
+    # ------------------------------------------------------------------
+    # 3. Moving averages for rate/percentage series (YoY / MoM columns)
+    # ------------------------------------------------------------------
+    pct_cols = [c for c in monthly.columns if c.endswith("_YoY") or c.endswith("_MoM")]
+    if pct_cols:
+        roll3 = monthly[pct_cols].rolling(3, min_periods=1).mean()
+        roll3.columns = [f"{c}_3M_MA" for c in pct_cols]
+        roll6 = monthly[pct_cols].rolling(6, min_periods=1).mean()
+        roll6.columns = [f"{c}_6M_MA" for c in pct_cols]
+        monthly = monthly.join(roll3, how="left").join(roll6, how="left")
+
+    # ------------------------------------------------------------------
+    # 4. 24-month rolling z-score for all numeric columns
+    #    Build in a dict and join once to avoid fragmentation warnings
+    # ------------------------------------------------------------------
+    zscore_cols = {}
+    numeric_cols = [c for c in monthly.columns if pd.api.types.is_numeric_dtype(monthly[c])]
+    for col in numeric_cols:
+        mean24 = monthly[col].rolling(24, min_periods=1).mean()
+        std24 = monthly[col].rolling(24, min_periods=1).std()
+        z = np.where(std24 != 0, (monthly[col] - mean24) / std24, 0)
+        zscore_cols[f"{col}_ZScore"] = pd.Series(z, index=monthly.index)
+    if zscore_cols:
+        monthly = monthly.join(pd.DataFrame(zscore_cols), how="left")
+
+    # Provide simple aliases expected elsewhere in the codebase
+    alias_map = {
+        "CPI_YoY": "CPIAUCSL_YoY",
+        "GDP_YoY": "GDPC1_YoY",
+    }
+    for alias, source in alias_map.items():
+        if alias not in monthly.columns and source in monthly.columns:
+            monthly[alias] = monthly[source]
+
+    logger.info("process_macro_data: finished feature engineering (%d cols)", len(monthly.columns))
+
+    # Non-breaking validation (warnings only)
+    try:
+        validate_frame(monthly, ProcessedMacroFrame, validate=False, where="process_macro_data")
+    except Exception:
+        # Should not raise when validate=False, but guard anyway
+        logger.debug("ProcessedMacroFrame validation raised unexpectedly", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Build and persist per-theme composites alongside raw features
+    # ------------------------------------------------------------------
+    try:
+        mapping = group_features(monthly)
+        # Convert dashboard-oriented group names to canonical theme keys
+        theme_key_map = {
+            "Growth & Labour": "growth",
+            "Inflation & Liquidity": "inflation",  # liquidity will be captured by keywords too
+            "Credit & Risk": "credit_risk",
+            "Housing": "housing",
+            "FX & Commodities": "external",
+        }
+        canonical_mapping = {}
+        for k, cols in mapping.items():
+            canon = theme_key_map.get(k, k)
+            canonical_mapping.setdefault(canon, []).extend(cols)
+
+        composites = build_theme_composites(monthly, canonical_mapping)
+        features_with_f = monthly.join(composites, how="left")
+
+        # Optional PCA per theme (controlled by YAML config: use_pca)
+        cfg = load_yaml_config() or {}
+        use_pca = bool((cfg.get("themes") or {}).get("use_pca") or cfg.get("use_pca"))
+        if use_pca:
+            pca_map = {
+                "growth": "PC_Growth",
+                "inflation": "PC_Inflation",
+                "liquidity": "PC_Liquidity",
+                "credit_risk": "PC_CreditRisk",
+                "housing": "PC_Housing",
+                "external": "PC_External",
+            }
+            for theme_key, pc_name in pca_map.items():
+                cols = canonical_mapping.get(theme_key, [])
+                if not cols:
+                    continue
+                pc1, _params = fit_theme_pca(features_with_f, cols, n_components=1)
+                features_with_f[pc_name] = pc1
+        # Save parquet with raw + engineered + F_*
+        import os
+        out_path = os.path.join("Data", "processed", "macro_features.parquet")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        features_with_f.to_parquet(out_path)
+        logger.info("Saved macro features with composites to %s", out_path)
+    except Exception as exc:
+        logger.warning("Failed to build/persist theme composites: %s", exc)
+        features_with_f = monthly
+
+    return features_with_f
+
+def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
+>>>>>>> Stashed changes
     """
     Create advanced macroeconomic features for regime detection.
     
@@ -354,10 +482,10 @@ def calculate_returns(prices_df):
     """
     try:
         # Resample to month-end and calculate returns
-        returns_monthly = prices_df.resample('M').last().pct_change()
+        returns_monthly = prices_df.resample('ME').last().pct_change()
         
         # Handle missing values
-        returns_monthly = returns_monthly.fillna(method='ffill', limit=3)
+        returns_monthly = returns_monthly.ffill(limit=3)
         returns_monthly = returns_monthly.dropna(how='all')
         
         logger.info(f"Successfully calculated returns with shape: {returns_monthly.shape}")
@@ -461,6 +589,13 @@ def calculate_regime_performance(data_for_analysis, regime_col):
         regime_performance_annualized.columns.names = ['Asset', 'Metric']
         
         logger.info(f"Successfully calculated regime performance metrics")
+
+        # Non-breaking validation (warnings only)
+        try:
+            validate_frame(regime_performance_annualized, PerformanceFrame, validate=False, where="calculate_regime_performance")
+        except Exception:
+            logger.debug("PerformanceFrame validation raised unexpectedly", exc_info=True)
+
         return regime_performance_annualized
     
     except Exception as e:

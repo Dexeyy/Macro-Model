@@ -88,6 +88,44 @@ class PortfolioConstructor:
         self.constraints = constraints or PortfolioConstraints()
         logger.info("Initialized PortfolioConstructor")
     
+    def _infer_annualization_factor_from_index(self, index: pd.DatetimeIndex) -> int:
+        """Infer annualization factor from a DatetimeIndex frequency.
+        Defaults to 12 (monthly) if uncertain.
+        """
+        try:
+            if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+                return 12
+            freq = pd.infer_freq(index)
+            if freq is None:
+                # Fallback: use median days between observations
+                deltas = np.diff(index.values).astype('timedelta64[D]').astype(int)
+                if len(deltas) == 0:
+                    return 12
+                med = int(np.median(deltas))
+                if med <= 2:
+                    return 252
+                if med <= 9:
+                    return 52
+                if med <= 40:
+                    return 12
+                if med <= 120:
+                    return 4
+                return 1
+            # Normalize freq codes
+            if freq in ("D", "B") or freq.startswith("D") or freq.startswith("B"):
+                return 252
+            if freq.startswith("W"):
+                return 52
+            if freq.endswith("M") or freq in ("MS", "M", "ME"):
+                return 12
+            if freq.startswith("Q"):
+                return 4
+            if freq.startswith("A") or freq.startswith("Y"):
+                return 1
+            return 12
+        except Exception:
+            return 12
+    
     def calculate_regime_statistics(self, 
                                   returns: pd.DataFrame, 
                                   regimes: pd.Series) -> Dict[str, Dict]:
@@ -147,9 +185,12 @@ class PortfolioConstructor:
                     logger.warning(f"Singular covariance matrix for regime {regime}, using diagonal approximation")
                     covariance = np.diag(np.diag(covariance)) + np.eye(len(covariance)) * 1e-6
                 
-                # Calculate additional metrics
-                volatility = regime_returns.std()
-                sharpe_ratios = (mean_returns * 252 - self.risk_free_rate) / (volatility * np.sqrt(252))
+                # Calculate additional metrics with proper annualization based on frequency
+                periods_per_year = self._infer_annualization_factor_from_index(regime_returns.index)
+                volatility = regime_returns.std() * np.sqrt(periods_per_year)
+                denom = volatility.replace(0, np.nan)
+                sharpe_ratios = (mean_returns * periods_per_year - self.risk_free_rate) / denom
+                sharpe_ratios = sharpe_ratios.fillna(0.0)
                 
                 # Correlation matrix
                 correlation = regime_returns.corr()
@@ -158,11 +199,12 @@ class PortfolioConstructor:
                 regime_stats[regime] = {
                     'count': len(regime_returns),
                     'mean_returns': mean_returns,
-                    'annualized_returns': mean_returns * 252,
+                    'annualized_returns': mean_returns * periods_per_year,
                     'volatility': volatility,
                     'covariance': covariance,
                     'correlation': correlation,
                     'sharpe_ratios': sharpe_ratios,
+                    'periods_per_year': periods_per_year,
                     'max_return': regime_returns.max(),
                     'min_return': regime_returns.min(),
                     'skewness': regime_returns.skew(),
@@ -191,13 +233,14 @@ class PortfolioConstructor:
                              weights: np.ndarray, 
                              returns: pd.Series, 
                              covariance: pd.DataFrame,
-                             risk_free_rate: float = None) -> float:
+                             risk_free_rate: float = None,
+                             periods_per_year: int = 252) -> float:
         """Calculate negative Sharpe ratio (for minimization)"""
         if risk_free_rate is None:
             risk_free_rate = self.risk_free_rate
         
-        portfolio_return = self._portfolio_return(weights, returns) * 252  # Annualize
-        portfolio_volatility = np.sqrt(self._portfolio_variance(weights, covariance)) * np.sqrt(252)
+        portfolio_return = self._portfolio_return(weights, returns) * periods_per_year  # Annualize
+        portfolio_volatility = np.sqrt(self._portfolio_variance(weights, covariance)) * np.sqrt(periods_per_year)
         
         if portfolio_volatility == 0:
             return -np.inf if portfolio_return > risk_free_rate else 0
@@ -279,8 +322,9 @@ class PortfolioConstructor:
             bounds = self._build_bounds(n_assets)
             
             # Define objective function based on method
+            periods_per_year = regime_stats[regime].get('periods_per_year', 12)
             if method == OptimizationMethod.SHARPE:
-                objective_func = lambda w: self._negative_sharpe_ratio(w, returns, covariance)
+                objective_func = lambda w: self._negative_sharpe_ratio(w, returns, covariance, periods_per_year=periods_per_year)
             elif method == OptimizationMethod.MIN_VARIANCE:
                 objective_func = lambda w: self._portfolio_variance(w, covariance)
             elif method == OptimizationMethod.MAX_RETURN:
@@ -310,7 +354,7 @@ class PortfolioConstructor:
                 weights = result.x
                 success = True
             
-            return self._create_portfolio_result(weights, returns, covariance, method.value, regime, success)
+            return self._create_portfolio_result(weights, returns, covariance, method.value, regime, success, periods_per_year)
             
         except Exception as e:
             logger.error(f"Error optimizing portfolio for regime {regime}: {e}")
@@ -332,12 +376,13 @@ class PortfolioConstructor:
                                covariance: pd.DataFrame,
                                method: str,
                                regime: str,
-                               success: bool = True) -> PortfolioResult:
+                                success: bool = True,
+                                periods_per_year: int = 252) -> PortfolioResult:
         """Create a PortfolioResult object from optimization results"""
         weights_series = pd.Series(weights, index=returns.index)
         
-        expected_return = self._portfolio_return(weights, returns) * 252  # Annualized
-        expected_volatility = np.sqrt(self._portfolio_variance(weights, covariance)) * np.sqrt(252)
+        expected_return = self._portfolio_return(weights, returns) * periods_per_year  # Annualized
+        expected_volatility = np.sqrt(self._portfolio_variance(weights, covariance)) * np.sqrt(periods_per_year)
         
         sharpe_ratio = (expected_return - self.risk_free_rate) / expected_volatility if expected_volatility > 0 else 0
         
@@ -449,8 +494,9 @@ class PortfolioConstructor:
             
             # Basic return metrics
             total_return = (1 + portfolio_returns).prod() - 1
-            annualized_return = (1 + portfolio_returns.mean()) ** 252 - 1
-            annualized_volatility = portfolio_returns.std() * np.sqrt(252)
+            periods_per_year = self._infer_annualization_factor_from_index(portfolio_returns.index)
+            annualized_return = (1 + portfolio_returns.mean()) ** periods_per_year - 1
+            annualized_volatility = portfolio_returns.std() * np.sqrt(periods_per_year)
             
             # Risk-adjusted metrics
             sharpe_ratio = (annualized_return - self.risk_free_rate) / annualized_volatility if annualized_volatility > 0 else 0
@@ -470,7 +516,7 @@ class PortfolioConstructor:
             
             # Downside risk metrics
             downside_returns = portfolio_returns[portfolio_returns < 0]
-            downside_deviation = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else 0
+            downside_deviation = downside_returns.std() * np.sqrt(periods_per_year) if len(downside_returns) > 0 else 0
             sortino_ratio = (annualized_return - self.risk_free_rate) / downside_deviation if downside_deviation > 0 else 0
             
             # Value at Risk (VaR) and Conditional VaR (CVaR) at 95% confidence level

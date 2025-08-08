@@ -34,7 +34,7 @@ class PerformanceAnalytics:
     drawdowns, performing regime-based attribution, and creating visualizations.
     """
     
-    def __init__(self, risk_free_rate: float = 0.02, annualization_factor: int = 252):
+    def __init__(self, risk_free_rate: float = 0.02, annualization_factor: int = 12):
         """
         Initialize the PerformanceAnalytics module.
         
@@ -164,6 +164,22 @@ class PerformanceAnalytics:
             
             # Basic metrics
             total_return = (1 + returns_clean).prod() - 1
+            # Infer frequency: fallback to provided annualization_factor (default monthly=12)
+            try:
+                inferred = pd.infer_freq(returns_clean.index)
+                if inferred is not None:
+                    if inferred.startswith('D') or inferred.startswith('B'):
+                        annualization_factor = 252
+                    elif inferred.startswith('W'):
+                        annualization_factor = 52
+                    elif inferred.endswith('M') or inferred in ('MS', 'M', 'ME'):
+                        annualization_factor = 12
+                    elif inferred.startswith('Q'):
+                        annualization_factor = 4
+                    elif inferred.startswith('A') or inferred.startswith('Y'):
+                        annualization_factor = 1
+            except Exception:
+                pass
             annualized_return = (1 + total_return) ** (annualization_factor / len(returns_clean)) - 1
             volatility = returns_clean.std() * np.sqrt(annualization_factor)
             
@@ -429,6 +445,83 @@ class PerformanceAnalytics:
         except Exception as e:
             logger.error(f"Error in regime performance attribution: {str(e)}")
             return {}
+
+    def build_regime_scorecard(self, returns_df: pd.DataFrame, regime_series_dict: Dict[str, pd.Series]) -> pd.DataFrame:
+        """Compute per-regime metrics across multiple label sets and save CSV.
+
+        For each regime label set name and each asset column in returns_df, compute:
+          - per-regime mean, volatility, Sharpe (monthly stats)
+          - max drawdown of the asset's cumulative return within each regime slice
+          - ANOVA p-value testing if monthly returns differ across regimes
+        """
+        try:
+            from scipy import stats  # optional, but common in environments
+        except Exception:
+            stats = None
+
+        results: List[Dict] = []
+        for label_name, regimes in regime_series_dict.items():
+            if regimes is None or regimes.empty:
+                continue
+            # Align on index
+            idx = returns_df.index.intersection(regimes.index)
+            if len(idx) == 0:
+                continue
+            rets = returns_df.loc[idx]
+            reg = regimes.loc[idx]
+            for asset in rets.columns:
+                r = rets[asset].dropna()
+                common = r.index.intersection(reg.index)
+                r = r.loc[common]
+                lab = reg.loc[common]
+                if r.empty:
+                    continue
+                # ANOVA across regimes (if scipy available and >=2 groups)
+                anova_p = np.nan
+                if stats is not None:
+                    groups = [r[lab == g] for g in lab.unique()]
+                    groups = [g for g in groups if len(g) > 1]
+                    if len(groups) >= 2:
+                        try:
+                            f, p = stats.f_oneway(*groups)
+                            anova_p = float(p)
+                        except Exception:
+                            anova_p = np.nan
+                # Per-regime metrics
+                for g in lab.unique():
+                    mask = lab == g
+                    rg = r[mask]
+                    if rg.empty:
+                        continue
+                    mean = float(rg.mean())
+                    vol = float(rg.std())
+                    sharpe = mean / vol if vol > 0 else 0.0
+                    # max drawdown within slice
+                    cum = (1 + rg).cumprod()
+                    mdd = float(((cum / cum.cummax()) - 1).min()) if len(cum) > 0 else 0.0
+                    results.append({
+                        "label_set": label_name,
+                        "asset": asset,
+                        "regime": g,
+                        "mean": mean,
+                        "vol": vol,
+                        "sharpe": sharpe,
+                        "max_drawdown": mdd,
+                        "anova_p": anova_p,
+                        "observations": int(len(rg)),
+                    })
+
+        scorecard = pd.DataFrame(results)
+        try:
+            import os
+            out_dir = os.path.join("Output", "diagnostics")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, "regime_scorecard.csv")
+            scorecard.to_csv(out_path, index=False)
+            logger.info("Saved regime scorecard to %s", out_path)
+        except Exception as exc:
+            logger.warning("Failed to save regime scorecard: %s", exc)
+        return scorecard
     
     def _analyze_regime_transitions(self, returns: pd.Series, regimes: pd.Series) -> Dict:
         """Analyze performance around regime transitions."""

@@ -1,12 +1,10 @@
 """
-Rule-Based Regime Classification System
+Regime classification orchestration.
 
-This module implements a sophisticated rule-based regime classifier that uses
-predefined economic indicators and thresholds to classify market regimes.
-The system supports multiple regime types (expansion, recession, recovery, 
-stagflation) with customizable rules and evaluation logic.
-
-Author: Macro Regime Analysis System
+Refactored to delegate model-specific logic to dedicated classes implementing
+the RegimeModel protocol (HMM, GMM, KMeans, Rule). This module wires them
+according to configuration and assembles unified outputs with labels and
+probabilities.
 """
 
 import pandas as pd
@@ -21,6 +19,16 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+from src.utils.contracts import validate_frame, RegimeFrame
+from src.utils.helpers import load_yaml_config
+from src.models.base import RegimeResult
+from src.models.hmm_model import HMMModel
+from src.models.gmm_model import GMMModel
+from src.models.kmeans_model import KMeansModel
+from src.models.rule_model import RuleModel
+from src.models.postprocess import apply_min_duration, confirm_by_probability
+from src.models.ensemble import ensemble_probs, ensemble_labels
+from src.models.validators import chow_mean_change_test, duration_sanity
 
 
 class RegimeType(Enum):
@@ -687,6 +695,142 @@ def apply_dynamic_factor_model(data: pd.DataFrame, n_factors: int = 3) -> pd.Ser
     # Apply K-means to the factors
     return apply_kmeans_classification(pd.DataFrame(factors, index=data.index), n_clusters=4)
 
+<<<<<<< Updated upstream
+=======
+def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes: int = 4) -> pd.DataFrame:
+    """Fit selected regime models and return labels + probabilities per model.
+
+    - Builds X from F_* composites if available; else numeric features provided via `features`
+    - Selected models from YAML config (default: [rule, kmeans, hmm])
+    - Returns DataFrame containing <Model> column with string labels and
+      <Model>_Prob_<i> columns for probabilities when available.
+    """
+    cfg = load_yaml_config() or {}
+    selected = cfg.get("models") or ["rule", "kmeans", "hmm"]
+
+    # Feature selection: prefer PC_* then F_*; fallback to provided list or numeric columns
+    # Clean infinities to avoid model failures
+    data = data.replace([np.inf, -np.inf], np.nan)
+    pc_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("PC_")]
+    f_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("F_")]
+    if pc_cols:
+        X = data[pc_cols].dropna(axis=1, how="all").copy()
+    elif f_cols:
+        X = data[f_cols].dropna(axis=1, how="all").copy()
+    elif features is not None:
+        X = data[features].copy()
+    else:
+        X = data.select_dtypes("number").dropna(axis=1, how="any").copy()
+
+    registry = {
+        "hmm": HMMModel(cfg),
+        "gmm": GMMModel(n_components=n_regimes, cfg=cfg),
+        "kmeans": KMeansModel(n_clusters=n_regimes, cfg=cfg),
+        "rule": RuleModel(cfg),
+    }
+
+    outputs: Dict[str, pd.DataFrame] = {}
+    prob_list: List[pd.DataFrame] = []
+    for name in selected:
+        model = registry.get(name)
+        if model is None:
+            continue
+        try:
+            # For sklearn models that cannot handle NaN, use a simple imputation
+            X_input = X
+            if name in ("kmeans", "gmm"):
+                X_input = X_input.fillna(0.0)
+            res: RegimeResult = model.fit(X_input)
+        except Exception as exc:
+            logger.warning("Model '%s' failed: %s", name, exc)
+            continue
+        # Post-process HMM: probability confirmation and min-duration smoothing
+        if name == "hmm" and isinstance(res.proba, pd.DataFrame) and not res.proba.empty:
+            hmm_cfg = (cfg.get("hmm") or {})
+            thr = float(hmm_cfg.get("prob_threshold", 0.7))
+            consec = int(hmm_cfg.get("min_duration", hmm_cfg.get("confirm_consecutive", 2)))
+            # confirm by probability
+            confirmed = confirm_by_probability(res.proba, threshold=thr, consecutive=int((cfg.get("ensemble") or {}).get("confirm_consecutive", consec)))
+            # Min-duration smoothing
+            smoothed = apply_min_duration(confirmed, k=int(hmm_cfg.get("min_duration", 3)))
+            res = RegimeResult(labels=smoothed, proba=res.proba, diagnostics={**(res.diagnostics or {}), "post": "applied"})
+
+        # Write labels as categorical names
+        label_series = res.labels.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
+        # Normalized display names to match downstream expectations
+        col_label = {
+            "hmm": "HMM",
+            "gmm": "GMM",
+            "kmeans": "KMeans",
+            "rule": "Rule",
+        }.get(name, name.capitalize())
+        outputs[col_label] = label_series.to_frame(name=col_label)
+        # probabilities
+        if isinstance(res.proba, pd.DataFrame) and not res.proba.empty:
+            prob_cols = {c: f"{col_label}_Prob_{i}" for i, c in enumerate(res.proba.columns)}
+            probs_named = res.proba.rename(columns=prob_cols)
+            outputs[col_label] = pd.concat([outputs[col_label], probs_named], axis=1)
+            # also collect a generic state_i matrix for ensembling
+            prob_list.append(res.proba.copy())
+
+    if not outputs:
+        return pd.DataFrame(index=data.index)
+
+    out = pd.concat(outputs.values(), axis=1)
+
+    # Probability-based ensemble if ≥ 2 models with probabilities
+    if len(prob_list) >= 2:
+        ens = ensemble_probs(prob_list)
+        if not ens.empty:
+            # Add named ensemble probability columns
+            ens_named = ens.rename(columns={c: f"Ensemble_Prob_{i}" for i, c in enumerate(ens.columns)})
+            out = out.join(ens_named, how="left")
+            # Convert to labels and apply same stabilization as HMM using config
+            raw_ens = ensemble_labels(ens)
+            hmm_cfg = (cfg.get("hmm") or {})
+            thr = float(hmm_cfg.get("prob_threshold", 0.7))
+            consec = int((cfg.get("ensemble") or {}).get("confirm_consecutive", 2))
+            ens_conf = confirm_by_probability(ens, threshold=thr, consecutive=consec)
+            ens_smooth = apply_min_duration(ens_conf, k=int(hmm_cfg.get("min_duration", 3)))
+            out["Regime_Ensemble"] = ens_smooth.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
+
+            # --- Validators -------------------------------------------------
+            # Duration sanity
+            sanity = duration_sanity(ens_smooth)
+            # Chow-like mean change test around each switch; record last switch
+            switches = np.where(ens_smooth.values[1:] != ens_smooth.values[:-1])[0]
+            passed_chow = True
+            if switches.size > 0 and "F_Growth" in data.columns:
+                last_switch = int(switches[-1] + 1)  # index after change
+                chow = chow_mean_change_test(data["F_Growth"], last_switch, window=6)
+                passed_chow = bool(chow.get("passed_chow", False))
+            flags = {
+                "passed_duration": not sanity.get("flagged_short", False),
+                "passed_chow": passed_chow,
+            }
+            out["Validation_Flags"] = [flags] * len(out)
+    else:
+        # Fallback: if no probability ensemble, use priority rule on labels
+        cols = [c for c in out.columns if c in ("HMM", "GMM", "KMeans", "Rule")]
+        def _ensemble(row):
+            vals = row[cols].dropna().tolist()
+            if not vals:
+                return np.nan
+            for v in vals:
+                if vals.count(v) >= 2:
+                    return v
+            return row.get("HMM", vals[0])
+        out["Regime_Ensemble"] = out.apply(_ensemble, axis=1)
+
+    # Non-breaking validation (warnings only)
+    try:
+        validate_frame(out, RegimeFrame, validate=False, where="fit_regimes")
+    except Exception:
+        logger.debug("RegimeFrame validation raised unexpectedly", exc_info=True)
+
+    return out
+
+>>>>>>> Stashed changes
 def apply_ensemble_classification(data: pd.DataFrame, methods: List[str] = None) -> pd.Series:
     """
     Apply ensemble classification combining multiple methods.

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 import os
+from typing import Any, Dict, Optional
 import json
 from datetime import datetime
 
@@ -201,3 +202,31 @@ def create_output_filename(base_name, extension, output_dir='output'):
     timestamp = generate_timestamp()
     filename = f"{base_name}_{timestamp}.{extension}"
     return os.path.join(output_dir, filename) 
+
+
+def load_yaml_config(path: str = "config/regimes.yaml") -> Optional[Dict[str, Any]]:
+    """Safely load a YAML configuration file.
+
+    - If PyYAML is not installed or file is missing/invalid, returns None.
+    - Never raises to keep runtime behavior unchanged when config is absent.
+    """
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        logger.info("PyYAML not installed; skipping YAML config load for %s", path)
+        return None
+
+    try:
+        if not os.path.exists(path):
+            logger.info("YAML config not found at %s; proceeding with defaults", path)
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        if not isinstance(cfg, dict):
+            logger.warning("YAML at %s did not parse to a dict; ignoring", path)
+            return None
+        logger.info("Loaded YAML config from %s", path)
+        return cfg
+    except Exception as exc:
+        logger.warning("Failed to load YAML config %s: %s", path, exc)
+        return None

@@ -360,6 +360,68 @@ def create_advanced_features(macro_data: pd.DataFrame) -> pd.DataFrame:
     
     return advanced_data
 
+
+def build_theme_composites(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Build per-theme composite factors from a mapping of theme -> source columns.
+
+    For each theme list of columns:
+      - Compute z-score for each source series using a 10-year rolling window (120 months)
+        when possible; fall back to full-sample z-score when there is insufficient history.
+      - Equal-weight average the z-scored series to produce a composite time series.
+
+    Output column names:
+      F_Growth, F_Inflation, F_Liquidity, F_CreditRisk, F_Housing, F_External
+
+    Any theme with no valid inputs is skipped.
+    """
+    composites = pd.DataFrame(index=df.index)
+
+    def _zscore_series(s: pd.Series) -> pd.Series:
+        s = s.astype(float)
+        valid = s.dropna()
+        if valid.size >= 120:
+            mean = s.rolling(120, min_periods=12).mean()
+            std = s.rolling(120, min_periods=12).std(ddof=0)
+            z = (s - mean) / std.replace(0.0, np.nan)
+        else:
+            mu = valid.mean()
+            sd = valid.std(ddof=0)
+            if not np.isfinite(sd) or sd == 0:
+                z = s * np.nan
+            else:
+                z = (s - mu) / sd
+        return z
+
+    # Normalize keys to expected canonical names
+    key_map = {
+        "growth": "F_Growth",
+        "inflation": "F_Inflation",
+        "liquidity": "F_Liquidity",
+        "credit_risk": "F_CreditRisk",
+        "creditrisk": "F_CreditRisk",
+        "housing": "F_Housing",
+        "external": "F_External",
+    }
+
+    for theme_key, cols in mapping.items():
+        if not cols:
+            continue
+        tgt = key_map.get(str(theme_key).lower())
+        if not tgt:
+            # allow direct target name like "F_Growth"
+            tgt = str(theme_key)
+        # Filter to existing numeric columns
+        valid_cols = [c for c in cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if not valid_cols:
+            continue
+        z_cols = [_zscore_series(df[c]) for c in valid_cols]
+        if not z_cols:
+            continue
+        z_mat = pd.concat(z_cols, axis=1)
+        composites[tgt] = z_mat.mean(axis=1)
+
+    return composites
+
 # Convenience functions
 def calculate_yield_curve_slope(data: pd.DataFrame) -> pd.Series:
     """Calculate yield curve slope (10Y - 2Y)."""

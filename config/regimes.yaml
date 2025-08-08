@@ -1,0 +1,16 @@
+models: [rule, kmeans, hmm]
+hmm:
+  n_states_range: [2, 6]
+  covariance_type: full
+  min_duration: 3
+  prob_threshold: 0.7
+ensemble:
+  confirm_consecutive: 2
+themes:
+  growth: []
+  inflation: []
+  liquidity: []
+  credit_risk: []
+  housing: []
+  external: []
+

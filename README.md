@@ -5,12 +5,31 @@ A Python framework for analyzing macroeconomic regimes and their impact on asset
 ## Overview
 
 This project provides tools to:
-1. Fetch and process macroeconomic data from FRED
-2. Fetch asset price data from Yahoo Finance
-3. Classify economic regimes using rule-based and machine learning approaches
-4. Analyze asset performance across different regimes
-5. Create regime-based investment portfolios
-6. Generate advanced macroeconomic features for enhanced regime detection
+- Fetch and process macroeconomic data (FRED) and asset prices (Yahoo Finance)
+- Engineer macro features and theme composites (F_Growth, F_Inflation, F_Liquidity, F_CreditRisk, F_Housing, F_External)
+- Fit multiple regime models (Rule, KMeans, HMM, optional GMM) and compute probabilities
+- Build probability-based ensemble regimes with stability post-processing
+- Analyze performance by regime and export diagnostics
+- Generate an Excel dashboard with clean, category-specific pages
+
+## Architecture
+
+```
+Data (FRED, Yahoo) ──> Processing (resample, YoY/MoM, MAs, z-scores)
+                         └─> Theme Composites (F_*) & optional PCA (PC_*)
+                                      │
+                                      ▼
+                              Regime Models (Rule, KMeans, HMM, GMM)
+                                      │          └─ per‑model probabilities
+                                      ▼
+                              Ensemble (avg probs + confirmation + min‑duration)
+                                      │
+                                      ▼
+                        Performance Analytics (per‑regime metrics, scorecard)
+                                      │
+                                      ▼
+                         Excel Dashboard (theme pages + probabilities strip)
+```
 
 ## Project Structure
 
@@ -62,28 +81,62 @@ FRED_API_KEY=your_fred_api_key
 
 ## Usage
 
-### Running the full pipeline
+### Quickstart (CLI)
 
-```python
+Install CLI helper:
+```
+pip install typer[all]
+```
+
+Run the full pipeline (equivalent to `python main.py`):
+```
+python cli.py run full
+```
+
+Fit regimes and save merged output:
+```
+python cli.py regimes fit --models hmm gmm rule --use-pca false --n-regimes 4
+```
+
+Build the Excel dashboard with category pages:
+```
+python cli.py excel build \
+  --template src/excel/Macro Reg Template.xlsm \
+  --out Output/Macro_Reg_Report_with_category_dashboards.xlsm
+```
+
+### Using main.py
+```
 python main.py
 ```
+This runs: fetch/process → fit regimes → analyze performance → visuals → portfolios.
 
-### Using specific components
+## Configuration
 
-```python
-from src.data.fetchers import fetch_fred_series
-from src.models.regime_classifier import apply_rule_based_classification
-from src.visualization.plots import plot_regime_timeline
-
-# Fetch data
-macro_data = fetch_fred_series(...)
-
-# Classify regimes
-macro_data = apply_rule_based_classification(macro_data)
-
-# Visualize
-plot_regime_timeline(macro_data, 'Regime_Rule_Based')
+Primary YAML config (optional): `config/regimes.yaml`
 ```
+models: [rule, kmeans, hmm]
+hmm:
+  n_states_range: [2, 6]
+  covariance_type: full
+  min_duration: 3
+  prob_threshold: 0.7
+ensemble:
+  confirm_consecutive: 2
+themes:
+  growth: []
+  inflation: []
+  liquidity: []
+  credit_risk: []
+  housing: []
+  external: []
+# Optional flag (either top-level or themes.use_pca):
+use_pca: false
+```
+Notes:
+- If the YAML file is missing, defaults are used and behavior is unchanged.
+- `use_pca: true` enables `PC_*` factor features in addition to `F_*`.
+- HMM min-duration and probability threshold stabilize labels; ensemble uses the same settings.
 
 ## Economic Regimes
 
@@ -162,4 +215,18 @@ Extend the `create_advanced_features` function in `src/data/processors.py` to in
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Output Artifacts
+
+Generated under `/Output` (and `/Data/processed`):
+- Processed data
+  - `Data/processed/macro_data_featured.csv`
+  - `Data/processed/macro_features.parquet` (raw + engineered + F_* + optional PC_*)
+  - `Data/processed/macro_data_with_regimes.csv` (labels + probabilities + Validation_Flags)
+- Performance diagnostics
+  - `Output/diagnostics/regime_scorecard.csv` (per‑regime mean/vol/Sharpe, max DD, ANOVA p‑value)
+- Charts and Excel
+  - `Output/excel_charts/*.png` (per‑theme images and dashboard plots)
+  - `Output/Macro_Reg_Report_with_category_dashboards.xlsm` (theme pages, tables at J3, probability strip)
+  - (Legacy) `Output/Macro_Reg_Report.xlsx` if using earlier workflow
