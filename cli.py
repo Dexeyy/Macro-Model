@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sys
@@ -30,14 +30,24 @@ def _save_yaml_config(cfg: dict, path: str = "config/regimes.yaml") -> None:
         typer.secho(f"Failed to write YAML config: {exc}", fg=typer.colors.RED)
 
 
-def _load_processed_monthly() -> Optional[object]:
+def _load_processed_monthly(mode: Optional[str] = None) -> Optional[object]:
     import pandas
 
-    candidates = [
+    # Prefer mode-specific parquet if requested and available
+    candidates = []
+    if mode:
+        m = (mode or "").lower()
+        if m in ("rt", "real-time", "realtime"):
+            candidates.append(Path("Data/processed/macro_features_rt.parquet"))
+        elif m in ("retro", "revised", "full"):
+            candidates.append(Path("Data/processed/macro_features_retro.parquet"))
+
+    # Fallbacks
+    candidates.extend([
         Path("Data/processed/macro_features.parquet"),
         Path("Data/processed/merged.parquet"),
         Path("Data/processed/macro_data_featured.csv"),
-    ]
+    ])
     for p in candidates:
         if p.exists():
             if p.suffix.lower() == ".parquet":
@@ -81,8 +91,14 @@ app.add_typer(run_app, name="run")
 
 
 @run_app.command("full")
-def run_full() -> None:
-    """Run the full pipeline (equivalent to main.py)."""
+def run_full(
+    mode: Optional[str] = typer.Option(None, "--mode", help="Feature mode: 'rt' (real-time) or 'retro' (revised)")
+) -> None:
+    """Run the full pipeline (equivalent to main.py).
+
+    If --mode is provided, it updates YAML run.mode for this project so downstream uses RT/RETRO consistently.
+    """
+    import pandas as pd
     from main import (
         fetch_and_process_data,
         classify_regimes,
@@ -93,8 +109,25 @@ def run_full() -> None:
     from src.excel.build_macro_dashboard import build_inplace
     from src.excel.excel_live import write_excel_report
 
+    # Respect requested mode by persisting to YAML (used by fetch_and_process_data)
+    if mode:
+        m = (mode or "").lower()
+        if m in ("rt", "real-time", "realtime", "retro", "revised", "full"):
+            cfg = load_yaml_config() or {}
+            run_cfg = cfg.get("run") or {}
+            run_cfg["mode"] = "rt" if m in ("rt", "real-time", "realtime") else "retro"
+            cfg["run"] = run_cfg
+            _save_yaml_config(cfg)
+
     macro_data, asset_returns = fetch_and_process_data()
     macro_data_with_regimes = classify_regimes(macro_data)
+    # Ensure downstream receives a DataFrame, not a Series
+    if isinstance(macro_data_with_regimes, pd.Series):
+        name = macro_data_with_regimes.name or "Regime"
+        df_with_regime = macro_data.copy()
+        df_with_regime[name] = macro_data_with_regimes
+        macro_data_with_regimes = df_with_regime
+
     analysis_results = analyze_regime_performance(macro_data_with_regimes, asset_returns)
     create_visualizations(macro_data_with_regimes, analysis_results)
     create_portfolios(analysis_results)
@@ -130,6 +163,8 @@ def regimes_fit(
     models: List[str] = typer.Option(None, "--models", help="Models to run (e.g. hmm gmm rule)"),
     use_pca: bool = typer.Option(False, "--use-pca", help="Use PC_* features if available"),
     n_regimes: int = typer.Option(4, "--n-regimes", help="Target number of regimes for clustering models"),
+    mode: Optional[str] = typer.Option(None, "--mode", help="Feature mode: 'rt' (real-time) or 'retro' (revised)"),
+    bundle: Optional[str] = typer.Option("coincident", "--bundle", help="Feature bundle: 'coincident' or 'coincident_plus_leading'"),
 ) -> None:
     """Fit selected regime models and save results alongside processed data."""
     import pandas as pd
@@ -137,7 +172,7 @@ def regimes_fit(
     from config import config as cfg_paths  # output dir
     from src.utils.helpers import save_data
 
-    df = _load_processed_monthly()
+    df = _load_processed_monthly(mode)
     if df is None or df.empty:
         raise typer.Exit(code=1)
 
@@ -151,7 +186,7 @@ def regimes_fit(
         current["models"] = list(models)
         _save_yaml_config(current)
 
-    out = fit_regimes(df, features=None, n_regimes=int(n_regimes))
+    out = fit_regimes(df, features=None, n_regimes=int(n_regimes), mode=mode, bundle=bundle)
     # Persist merged file as in main.py
     merged = df.join(out, how="left")
     out_path = Path(cfg_paths.PROCESSED_DATA_DIR) / "macro_data_with_regimes.csv"
@@ -196,5 +231,7 @@ def excel_build(
 
 if __name__ == "__main__":
     app()
+
+
 
 

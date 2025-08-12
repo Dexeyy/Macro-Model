@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 
 
 def apply_min_duration(labels: pd.Series, k: int) -> pd.Series:
@@ -88,4 +89,69 @@ def confirm_by_probability(proba: pd.DataFrame, threshold: float, consecutive: i
 
     return pd.Series(out, index=proba.index, dtype="Int64")
 
+
+def _parse_label_to_int(v) -> int | None:
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    try:
+        s = str(v)
+        if s.isdigit():
+            return int(s)
+        if "_" in s:
+            tail = s.split("_")[-1]
+            if tail.isdigit():
+                return int(tail)
+    except Exception:
+        return None
+    return None
+
+
+def hierarchical_labels(
+    cycle: pd.Series,
+    inflation_factor: pd.Series,
+    inf_thresh: float = 0.0,
+) -> pd.Series:
+    """Construct 4-way hierarchical labels (cycle × inflation regime).
+
+    cycle: integer-like labels (2-state preferred). If string labels like 'Regime_1',
+           trailing integer is extracted.
+    inflation_factor: continuous factor (e.g., z-scored F_Inflation). Threshold at 0 by default.
+    Returns series with values in:
+      {Exp_Disinf, Exp_Infl, Contraction_Disinf, Contraction_Infl}
+    """
+    if cycle is None or cycle.empty or inflation_factor is None or inflation_factor.empty:
+        return pd.Series(dtype="object")
+
+    # Align indices
+    idx = cycle.index.intersection(inflation_factor.index)
+    c = cycle.loc[idx]
+    inf = inflation_factor.loc[idx]
+
+    # Convert labels to ints when possible
+    c_int = c.map(_parse_label_to_int)
+    # Determine expansion vs contraction states
+    states = sorted([s for s in c_int.dropna().unique()])
+    if len(states) == 0:
+        return pd.Series(index=idx, dtype="object")
+    # Heuristic: higher state id = expansion (stable for 2-state msdyn). If only one, treat as contraction.
+    expansion_state = max(states)
+
+    out = []
+    for i in idx:
+        ci = c_int.get(i)
+        if ci is None or np.isnan(ci):
+            out.append(np.nan)
+            continue
+        exp = bool(ci == expansion_state)
+        infl = bool(float(inf.get(i)) > float(inf_thresh)) if pd.notna(inf.get(i)) else False
+        if exp and not infl:
+            out.append("Exp_Disinf")
+        elif exp and infl:
+            out.append("Exp_Infl")
+        elif (not exp) and (not infl):
+            out.append("Contraction_Disinf")
+        else:
+            out.append("Contraction_Infl")
+
+    return pd.Series(out, index=idx, dtype="object")
 

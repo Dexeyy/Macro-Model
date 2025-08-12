@@ -17,6 +17,143 @@ import logging
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# -------------------- Feature bundle registry ----------------------------
+# Logical bundle names mapped to economic concepts. Concrete column mapping
+# is resolved by build_feature_bundle based on what's available in df.
+LEADING: List[str] = [
+    "curve_slope",
+    "breakevens",
+    "credit_spreads",
+    "PMI",
+    "new_orders",
+    "consumer_expect",
+]
+
+COINCIDENT: List[str] = [
+    "IP_YoY",
+    "Payrolls",
+    "CPI_YoY",
+    "FinancialConditions",
+    "Unemployment",
+    "Housing_starts",
+]
+
+def _resolve_bundle_columns(df: pd.DataFrame, token: str) -> List[str]:
+    """Return concrete column names for a logical token, computing simple
+    proxies when needed. Unknown tokens return an empty list.
+    """
+    cols: List[str] = []
+    t = token.lower()
+
+    def has(c: str) -> bool:
+        return c in df.columns
+
+    if t == "curve_slope":
+        if has("YieldCurve_Slope"):
+            cols.append("YieldCurve_Slope")
+        elif has("DGS10") and has("DGS2"):
+            slope = (df["DGS10"] - df["DGS2"]).rename("YieldCurve_Slope_tmp")
+            cols.append(slope.name)
+            df[slope.name] = slope
+
+    elif t == "breakevens":
+        for c in ("T10YIE", "T5YIFR"):
+            if has(c):
+                cols.append(c)
+                break
+
+    elif t == "credit_spreads":
+        if has("credit_spread"):
+            cols.append("credit_spread")
+        elif has("BAA") and has("AAA"):
+            cs = (df["BAA"] - df["AAA"]).rename("credit_spread_tmp")
+            cols.append(cs.name)
+            df[cs.name] = cs
+
+    elif t == "pmi":
+        for c in ("PMI", "PMICOMPOSITE", "UMCSENT"):
+            if has(c):
+                cols.append(c)
+                break
+
+    elif t == "new_orders":
+        for c in ("ANDENO", "AMDMNO", "ACOGNO"):
+            if has(c):
+                cols.append(c)
+                break
+
+    elif t == "consumer_expect":
+        if has("UMCSENT"):
+            cols.append("UMCSENT")
+
+    elif t == "ip_yoy":
+        if has("INDPRO_YoY"):
+            cols.append("INDPRO_YoY")
+        elif has("INDPRO"):
+            series = (df["INDPRO"].pct_change(12) * 100).rename("INDPRO_YoY_tmp")
+            cols.append(series.name)
+            df[series.name] = series
+
+    elif t == "payrolls":
+        if has("PAYEMS"):
+            cols.append("PAYEMS")
+
+    elif t == "cpi_yoy":
+        if has("CPI_YoY"):
+            cols.append("CPI_YoY")
+        elif has("CPIAUCSL"):
+            series = (df["CPIAUCSL"].pct_change(12) * 100).rename("CPI_YoY_tmp")
+            cols.append(series.name)
+            df[series.name] = series
+
+    elif t == "financialconditions":
+        if has("FinConditions_Composite"):
+            cols.append("FinConditions_Composite")
+        elif has("VIXCLS"):
+            cols.append("VIXCLS")
+
+    elif t == "unemployment":
+        if has("UNRATE"):
+            cols.append("UNRATE")
+
+    elif t == "housing_starts":
+        if has("HOUST"):
+            cols.append("HOUST")
+
+    return cols
+
+def build_feature_bundle(df: pd.DataFrame, bundle: str = "coincident") -> pd.DataFrame:
+    """Construct a feature matrix for the requested bundle.
+
+    - bundle="coincident": use only coincident signals
+    - bundle="coincident_plus_leading": union of coincident and leading tokens
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(index=pd.DatetimeIndex([]))
+
+    b = (bundle or "").lower()
+    tokens: List[str]
+    if b == "coincident_plus_leading":
+        tokens = COINCIDENT + LEADING
+    else:
+        tokens = COINCIDENT
+
+    working = df.copy()
+    selected_cols: List[str] = []
+    for t in tokens:
+        selected_cols.extend(_resolve_bundle_columns(working, t))
+
+    unique_cols = []
+    seen = set()
+    for c in selected_cols:
+        if c not in seen and c in working.columns and pd.api.types.is_numeric_dtype(working[c]):
+            unique_cols.append(c)
+            seen.add(c)
+
+    out = working[unique_cols].copy()
+    out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+    return out
+
 class IndicatorCategory(Enum):
     """Categories of economic indicators"""
     GROWTH = "growth"

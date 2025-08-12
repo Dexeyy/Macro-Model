@@ -1,4 +1,4 @@
-"""
+﻿"""
 Main entry point for the macro-regime-model application.
 """
 import os
@@ -11,7 +11,7 @@ from datetime import datetime
 # Import configuration
 import sys
 sys.path.append('config')
-import config
+from config import config  # import the module config/config.py explicitly
 
 # Import modules
 from src.data.fetchers import fetch_fred_series, fetch_asset_data, create_dummy_asset_data
@@ -22,15 +22,8 @@ from src.data.processors import (
     calculate_regime_performance,
     create_advanced_features
 )
-from src.models.regime_classifier import (
-    apply_rule_based_classification,
-    apply_kmeans_classification,
-    map_kmeans_to_labels,
-    apply_hmm_classification,
-    apply_markov_switching,
-    apply_dynamic_factor_model,
-    apply_ensemble_classification
-)
+from src.models.regime_classifier import fit_regimes
+from src.utils.helpers import get_regimes_config
 from src.models.portfolio import (
     create_equal_weight_portfolio,
     create_regime_based_portfolio,
@@ -69,11 +62,10 @@ def fetch_and_process_data():
     # Fetch macro data from FRED
     try:
         logger.info("Fetching macro data from FRED...")
-        macro_data_raw = fetch_fred_series(
-            config.FRED_SERIES,
-            config.START_DATE,
-            config.END_DATE
-        )
+        macro_data_raw = fetch_fred_series(config.FRED_SERIES, config.START_DATE, config.END_DATE)
+        # Apply FRED-MD transformations if available
+        from src.data.fetchers import apply_fredmd_tcodes
+        macro_data_raw = apply_fredmd_tcodes(macro_data_raw)
         save_data(
             macro_data_raw,
             os.path.join(config.RAW_DATA_DIR, 'macro_data_raw.csv')
@@ -85,14 +77,34 @@ def fetch_and_process_data():
     # Process macro data
     try:
         logger.info("Processing macro data...")
-        macro_data_featured = process_macro_data(macro_data_raw)
+        base_features = process_macro_data(macro_data_raw)
+        diagnose_dataframe(base_features, "macro_features_legacy")
+
+        # Prefer the mode specified in YAML to select RT vs RETRO artifacts produced by process_macro_data
+        try:
+            cfg_yaml = get_regimes_config() or {}
+            run_mode = ((cfg_yaml.get("run") or {}).get("mode") or "").lower()
+        except Exception:
+            run_mode = ""
+
+        chosen = None
+        try:
+            if run_mode in ("rt", "real-time", "realtime"):
+                p = os.path.join(config.PROCESSED_DATA_DIR, 'macro_features_rt.parquet')
+                if os.path.exists(p):
+                    chosen = pd.read_parquet(p)
+            elif run_mode in ("retro", "revised", "full"):
+                p = os.path.join(config.PROCESSED_DATA_DIR, 'macro_features_retro.parquet')
+                if os.path.exists(p):
+                    chosen = pd.read_parquet(p)
+        except Exception as _:
+            chosen = None
+
+        # Fallback to building advanced features in-process if no artifact was found
+        macro_data_featured = chosen if chosen is not None else create_advanced_features(base_features, mode=run_mode or "retro")
         diagnose_dataframe(macro_data_featured, "macro_data_featured")
-        
-        # Apply advanced feature engineering
-        logger.info("Creating advanced features...")
-        macro_data_featured = create_advanced_features(macro_data_featured)
-        diagnose_dataframe(macro_data_featured, "macro_data_with_advanced_features")
-        
+
+        # Persist a CSV view for downstream CLI/tools to read consistently
         save_data(
             macro_data_featured,
             os.path.join(config.PROCESSED_DATA_DIR, 'macro_data_featured.csv')
@@ -144,96 +156,25 @@ def fetch_and_process_data():
     return macro_data_featured, asset_returns
 
 def classify_regimes(macro_data):
-    """Apply regime classification methods."""
+    """Apply v2 regime classification and return merged DataFrame (features + labels/probs)."""
     logger.info("Starting regime classification...")
     
     if macro_data is None:
         logger.error("No macro data available for regime classification")
         return None
-    
-    # Apply rule-based classification
+
     try:
-        logger.info("Applying rule-based regime classification...")
-        macro_data = apply_rule_based_classification(macro_data)
+        cfg = get_regimes_config()
+        # Bundle preference from YAML unless overridden elsewhere
+        bundle = (cfg.get("run") or {}).get("bundle")
+        out = fit_regimes(macro_data, features=None, n_regimes=4, bundle=bundle)
+        merged = macro_data.join(out, how="left")
+        save_data(merged, os.path.join(config.PROCESSED_DATA_DIR, 'macro_data_with_regimes.csv'))
+        logger.info("Regime classification completed")
+        return merged
     except Exception as e:
-        logger.error(f"Error applying rule-based classification: {e}")
-    
-    # Apply K-means clustering
-    try:
-        logger.info("Applying K-means clustering...")
-        macro_data = apply_kmeans_classification(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_clusters=4
-        )
-        
-        # Map cluster numbers to meaningful labels
-        macro_data = map_kmeans_to_labels(macro_data)
-    except Exception as e:
-        logger.error(f"Error applying K-means classification: {e}")
-    
-    # Apply Hidden Markov Model classification
-    try:
-        logger.info("Applying Hidden Markov Model classification...")
-        macro_data = apply_hmm_classification(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_states=4
-        )
-    except Exception as e:
-        logger.error(f"Error applying HMM classification: {e}")
-    
-    # Apply Markov-Switching model
-    try:
-        logger.info("Applying Markov-Switching model...")
-        # Use GDP_YoY as the target feature if available
-        target_feature = 'GDP_YoY'
-        if target_feature in macro_data.columns:
-            macro_data = apply_markov_switching(
-                macro_data,
-                target_feature=target_feature,
-                k_regimes=3,
-                order=4
-            )
-        else:
-            logger.warning(f"Target feature {target_feature} not found for Markov-Switching model")
-    except Exception as e:
-        logger.error(f"Error applying Markov-Switching model: {e}")
-    
-    # Apply Dynamic Factor Model
-    try:
-        logger.info("Applying Dynamic Factor Model...")
-        macro_data = apply_dynamic_factor_model(
-            macro_data,
-            features=config.CLUSTER_FEATURES,
-            n_factors=2,
-            factor_order=1
-        )
-    except Exception as e:
-        logger.error(f"Error applying Dynamic Factor Model: {e}")
-    
-    # Apply Ensemble Classification
-    try:
-        logger.info("Applying Ensemble Classification...")
-        # Use all available methods
-        macro_data = apply_ensemble_classification(
-            macro_data,
-            methods=None  # Use all available methods
-        )
-    except Exception as e:
-        logger.error(f"Error applying Ensemble Classification: {e}")
-    
-    # Save the classified data
-    try:
-        save_data(
-            macro_data,
-            os.path.join(config.PROCESSED_DATA_DIR, 'macro_data_with_regimes.csv')
-        )
-    except Exception as e:
-        logger.error(f"Error saving classified data: {e}")
-    
-    logger.info("Regime classification completed")
-    return macro_data
+        logger.error(f"Regime classification failed: {e}")
+        return macro_data
 
 def analyze_regime_performance(macro_data, asset_returns):
     """Analyze asset performance across different regimes."""
@@ -245,8 +186,8 @@ def analyze_regime_performance(macro_data, asset_returns):
     
     results = {}
     
-    # Analyze for available regimes in the unified output (Rule/HMM/KMeans/Regime_Ensemble)
-    candidate_cols = [c for c in ['Rule', 'HMM', 'KMeans', 'Regime_Ensemble', 'Regime_Rule_Based', 'Regime_KMeans_Labeled'] if c in macro_data.columns]
+    # Analyze for available regimes in the unified output
+    candidate_cols = [c for c in ['Rule', 'HMM', 'KMeans', 'GMM', 'HSMM', 'Ensemble_Regime', 'Regime_Ensemble'] if c in macro_data.columns]
     for regime_col in candidate_cols:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
@@ -316,7 +257,7 @@ def create_visualizations(macro_data, analysis_results):
         return
     
     # Create regime timeline plots for available columns
-    for regime_col in [c for c in ['Rule', 'HMM', 'KMeans', 'Regime_Ensemble', 'Regime_Rule_Based', 'Regime_KMeans_Labeled'] if c in macro_data.columns]:
+    for regime_col in [c for c in ['Rule', 'HMM', 'GMM', 'KMeans', 'HSMM', 'Ensemble_Regime', 'Regime_Ensemble'] if c in macro_data.columns]:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
             continue
@@ -466,6 +407,12 @@ def main():
     
     # Step 2: Classify regimes
     macro_data_with_regimes = classify_regimes(macro_data)
+    # Ensure we pass a DataFrame with regime columns downstream
+    if isinstance(macro_data_with_regimes, pd.Series):
+        name = macro_data_with_regimes.name or "Regime"
+        tmp_df = macro_data.copy()
+        tmp_df[name] = macro_data_with_regimes
+        macro_data_with_regimes = tmp_df
     
     # Step 3: Analyze regime performance
     analysis_results = analyze_regime_performance(macro_data_with_regimes, asset_returns)
@@ -480,3 +427,4 @@ def main():
 
 if __name__ == "__main__":
     main() 
+

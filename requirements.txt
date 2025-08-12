@@ -12,6 +12,8 @@ dash>=2.9.0
 plotly>=5.14.0
 statsmodels>=0.13.0
 hmmlearn>=0.2.8
+hsmmlearn>=0.0.6 ; python_version < "3.12"
+pomegranate>=0.14.8
 streamlit>=1.28.0 
 =======
 pandas

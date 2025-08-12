@@ -122,6 +122,30 @@ def compute_metrics(df: pd.DataFrame):
     return latest, chg_3m, yoy, percentile, zscore, roll_vol_12m, slope_6m
 
 
+def load_data_dump_df(wb) -> Optional[pd.DataFrame]:
+    """Read the 'Data Dump' sheet as a DataFrame.
+
+    Assumes headers on first row, index in first column (dates).
+    """
+    if "Data Dump" not in wb.sheetnames:
+        return None
+    ws: Worksheet = wb["Data Dump"]
+    values = list(ws.values)
+    if not values:
+        return None
+    headers = [h if h is not None else f"col_{i}" for i, h in enumerate(values[0])]
+    rows = values[1:]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=headers)
+    try:
+        df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
+        df = df.set_index(df.columns[0])
+    except Exception:
+        pass
+    return df
+
+
 def render_plot_trend(theme: str, df: pd.DataFrame, outdir: Path) -> Optional[Path]:
     try:
         color = THEME_COLOR.get(theme, "#1f77b4")
@@ -138,6 +162,111 @@ def render_plot_trend(theme: str, df: pd.DataFrame, outdir: Path) -> Optional[Pa
         return None
 
 
+def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> Optional[Path]:
+    """Render a theme-specific signature chart. Skip gracefully if data missing."""
+    try:
+        fig, ax = plt.subplots(figsize=(7.4, 3.8))
+        t = theme
+        m = monthly
+        if t == "Growth & Labour":
+            # Business cycle clock: GDP_YoY vs UNRATE, colored by date order
+            if all(c in m.columns for c in ("GDP_YoY", "UNRATE")):
+                xy = m[["GDP_YoY", "UNRATE"]].dropna()
+                if xy.empty:
+                    raise ValueError
+                colors = np.linspace(0, 1, len(xy))
+                sc = ax.scatter(xy["GDP_YoY"], xy["UNRATE"], c=colors, cmap="viridis", s=12)
+                ax.set_xlabel("GDP YoY (%)")
+                ax.set_ylabel("Unemployment Rate (%)")
+                ax.set_title("Business Cycle Clock")
+            else:
+                ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+                ax.set_axis_off()
+
+        elif t == "Inflation & Liquidity":
+            # CPI contributions (if component series exist) and real policy rate line
+            components = [c for c in ("CPIAPPSL", "CPITRNSL", "CPIMEDSL", "CUSR0000SAC") if c in m.columns]
+            plotted = False
+            if components:
+                comp_yoy = pd.DataFrame({c: pd.to_numeric(m[c], errors="coerce").pct_change(12) * 100 for c in components}).dropna()
+                if not comp_yoy.empty:
+                    comp_yoy.tail(180).plot.area(ax=ax, stacked=True, linewidth=0)
+                    plotted = True
+            if "FEDFUNDS" in m.columns and "CPI_YoY" in m.columns:
+                rr = (pd.to_numeric(m["FEDFUNDS"], errors="coerce") - pd.to_numeric(m["CPI_YoY"], errors="coerce")).dropna()
+                if not plotted:
+                    rr.plot(ax=ax, color="#444444", linewidth=1.5, label="Real Policy Rate")
+                else:
+                    ax2 = ax.twinx()
+                    rr.tail(180).plot(ax=ax2, color="#444444", linewidth=1.5, label="Real Policy Rate")
+                    ax2.set_ylim(rr.tail(180).min()*1.1, rr.tail(180).max()*1.1)
+                plotted = True
+            if not plotted:
+                ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                ax.set_title("CPI Contributions & Real Policy Rate")
+
+        elif t == "Credit & Risk":
+            # IG spread (BAA-AAA) and NFCI stress if available
+            plotted = False
+            if all(c in m.columns for c in ("BAA", "AAA")):
+                ig = (pd.to_numeric(m["BAA"], errors="coerce") - pd.to_numeric(m["AAA"], errors="coerce")).dropna()
+                ig.tail(180).plot(ax=ax, color="#cc5500", linewidth=1.5, label="IG Spread (BAA-AAA)")
+                plotted = True
+            if "NFCI" in m.columns:
+                ax2 = ax.twinx() if plotted else ax
+                pd.to_numeric(m["NFCI"], errors="coerce").tail(180).plot(ax=ax2, color="#5555aa", linewidth=1.2, label="NFCI")
+                plotted = True
+            if not plotted:
+                ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                ax.set_title("Credit Spreads & Financial Stress")
+                ax.grid(True, axis="y", alpha=0.2)
+
+        elif t == "Housing":
+            # Permits vs Starts; mortgage rate if available
+            plotted = False
+            cols = [c for c in ("PERMIT", "HOUST") if c in m.columns]
+            if cols:
+                pd.DataFrame({c: pd.to_numeric(m[c], errors="coerce") for c in cols}).tail(240).plot(ax=ax, linewidth=1.5)
+                plotted = True
+            if "MORTGAGE30US" in m.columns:
+                ax2 = ax.twinx()
+                pd.to_numeric(m["MORTGAGE30US"], errors="coerce").tail(240).plot(ax=ax2, color="#777777", linewidth=1.2, label="Mortgage 30Y")
+                plotted = True
+            if not plotted:
+                ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                ax.set_title("Housing Pipeline & Mortgage Rate")
+
+        elif t == "FX & Commodities":
+            # Energy proxy (WTI), Dollar index (TWEX), optional gold if present
+            plotted = False
+            if "DCOILWTICO" in m.columns:
+                pd.to_numeric(m["DCOILWTICO"], errors="coerce").tail(240).plot(ax=ax, color="#8c564b", linewidth=1.5, label="WTI Oil")
+                plotted = True
+            if "TWEXAFEGSMTH" in m.columns:
+                ax2 = ax.twinx() if plotted else ax
+                pd.to_numeric(m["TWEXAFEGSMTH"], errors="coerce").tail(240).plot(ax=ax2, color="#1f77b4", linewidth=1.2, label="Dollar Index")
+                plotted = True
+            if not plotted:
+                ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+                ax.set_axis_off()
+            else:
+                ax.set_title("Energy & Dollar Index")
+
+        else:
+            ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
+            ax.set_axis_off()
+
+        return _save_plot(fig, outdir, f"{theme.replace(' & ', '_').replace(' ', '_').lower()}_signature.png")
+    except Exception:
+        return None
+
+
 def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
     if sheetname not in wb.sheetnames:
         return
@@ -148,6 +277,12 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
     p1 = render_plot_trend(sheetname, df, outdir)
     if p1:
         insert_image(ws, p1, "A2")
+    # Signature chart using Data Dump
+    monthly = load_data_dump_df(wb)
+    if monthly is not None and not monthly.empty:
+        p2 = render_theme_signature(sheetname, monthly, outdir)
+        if p2:
+            insert_image(ws, p2, "A22")
 
 
 def build_dashboard(wb, outdir: Path) -> None:
@@ -208,6 +343,33 @@ def build_regime_labels(wb, outdir: Path) -> None:
                 ax2.set_yticks([0, 0.5, 1.0])
                 ax2.set_title("Ensemble Probabilities (last 180 months)")
                 ax2.grid(True, axis="y", alpha=0.2)
+
+                # Low-confidence shading (confidence < 0.6)
+                try:
+                    if "Ensemble_Confidence" in df.columns:
+                        conf = pd.to_numeric(df["Ensemble_Confidence"], errors="coerce").fillna(0.0)
+                    else:
+                        conf = probs.max(axis=1)
+                    conf = conf.reindex(probs.index)
+                    low = conf < 0.6
+                    # find contiguous low segments
+                    if low.any():
+                        # convert to segments of start/end indices
+                        in_seg = False
+                        start = None
+                        dates = probs.index
+                        for i, flag in enumerate(low.values):
+                            if flag and not in_seg:
+                                in_seg = True
+                                start = dates[i]
+                            if in_seg and (not flag or i == len(low.values) - 1):
+                                end = dates[i] if not flag else dates[i]
+                                # draw shaded region on both axes
+                                ax1.axvspan(start, end, color="#000000", alpha=0.08)
+                                ax2.axvspan(start, end, color="#000000", alpha=0.08)
+                                in_seg = False
+                except Exception:
+                    pass
             else:
                 ax2.text(0.01, 0.5, "No ensemble probabilities available", transform=ax2.transAxes)
                 ax2.set_axis_off()

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Regime classification orchestration.
 
 Refactored to delegate model-specific logic to dedicated classes implementing
@@ -20,15 +20,18 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from src.utils.contracts import validate_frame, RegimeFrame
-from src.utils.helpers import load_yaml_config
+from src.utils.helpers import load_yaml_config, get_regimes_config
+from src.features.economic_indicators import build_feature_bundle
 from src.models.base import RegimeResult
 from src.models.hmm_model import HMMModel
 from src.models.gmm_model import GMMModel
 from src.models.kmeans_model import KMeansModel
 from src.models.rule_model import RuleModel
-from src.models.postprocess import apply_min_duration, confirm_by_probability
-from src.models.ensemble import ensemble_probs, ensemble_labels
-from src.models.validators import chow_mean_change_test, duration_sanity
+from src.models.hsmm_model import HSMMModel
+from src.models.msdyn_model import MSDynModel
+from src.models.postprocess import apply_min_duration, confirm_by_probability, hierarchical_labels
+from src.models.ensemble import average_probabilities, ensemble_labels
+from src.models.validators import chow_mean_change_test, duration_sanity, chow_mean_variance_test
 
 
 class RegimeType(Enum):
@@ -695,9 +698,13 @@ def apply_dynamic_factor_model(data: pd.DataFrame, n_factors: int = 3) -> pd.Ser
     # Apply K-means to the factors
     return apply_kmeans_classification(pd.DataFrame(factors, index=data.index), n_clusters=4)
 
-<<<<<<< Updated upstream
-=======
-def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes: int = 4) -> pd.DataFrame:
+def fit_regimes(
+    data: pd.DataFrame,
+    features: List[str] | None = None,
+    n_regimes: int = 4,
+    mode: Optional[str] = None,
+    bundle: Optional[str] = None,
+) -> pd.DataFrame:
     """Fit selected regime models and return labels + probabilities per model.
 
     - Builds X from F_* composites if available; else numeric features provided via `features`
@@ -705,28 +712,45 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
     - Returns DataFrame containing <Model> column with string labels and
       <Model>_Prob_<i> columns for probabilities when available.
     """
-    cfg = load_yaml_config() or {}
+    # Note: `mode` is currently informational for downstream callers (e.g., CLI),
+    # as this function receives a fully prepared DataFrame. Default behavior unchanged.
+    cfg = get_regimes_config()
     selected = cfg.get("models") or ["rule", "kmeans", "hmm"]
 
-    # Feature selection: prefer PC_* then F_*; fallback to provided list or numeric columns
-    # Clean infinities to avoid model failures
+    # Feature selection: bundle overrides default; else prefer PC_ then F_ ...
     data = data.replace([np.inf, -np.inf], np.nan)
-    pc_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("PC_")]
-    f_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("F_")]
-    if pc_cols:
-        X = data[pc_cols].dropna(axis=1, how="all").copy()
-    elif f_cols:
-        X = data[f_cols].dropna(axis=1, how="all").copy()
-    elif features is not None:
-        X = data[features].copy()
+    X: pd.DataFrame
+    # Bundle: prefer explicit arg; else YAML run.bundle
+    if not bundle:
+        bundle = (cfg.get("run") or {}).get("bundle")
+    if isinstance(bundle, str) and bundle:
+        try:
+            X = build_feature_bundle(data, bundle=bundle)
+        except Exception as exc:
+            logger.warning("Failed to build feature bundle '%s': %s; falling back", bundle, exc)
+            X = pd.DataFrame(index=data.index)
     else:
-        X = data.select_dtypes("number").dropna(axis=1, how="any").copy()
+        X = pd.DataFrame(index=data.index)
+
+    if X.empty:
+        pc_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("PC_")]
+        f_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("F_")]
+        if pc_cols:
+            X = data[pc_cols].dropna(axis=1, how="all").copy()
+        elif f_cols:
+            X = data[f_cols].dropna(axis=1, how="all").copy()
+        elif features is not None:
+            X = data[features].copy()
+        else:
+            X = data.select_dtypes("number").dropna(axis=1, how="any").copy()
 
     registry = {
         "hmm": HMMModel(cfg),
         "gmm": GMMModel(n_components=n_regimes, cfg=cfg),
         "kmeans": KMeansModel(n_clusters=n_regimes, cfg=cfg),
         "rule": RuleModel(cfg),
+        "hsmm": HSMMModel(cfg),
+        "msdyn": MSDynModel(cfg),
     }
 
     outputs: Dict[str, pd.DataFrame] = {}
@@ -740,31 +764,40 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
             X_input = X
             if name in ("kmeans", "gmm"):
                 X_input = X_input.fillna(0.0)
-            res: RegimeResult = model.fit(X_input)
+            # msdyn benefits from access to original data for composites/PCs
+            kwargs = {"original_data": data} if name == "msdyn" else {}
+            res: RegimeResult = model.fit(X_input, **kwargs)
         except Exception as exc:
             logger.warning("Model '%s' failed: %s", name, exc)
             continue
-        # Post-process HMM: probability confirmation and min-duration smoothing
-        if name == "hmm" and isinstance(res.proba, pd.DataFrame) and not res.proba.empty:
+        # Post-process HMM/GMM: probability confirmation and min-duration smoothing
+        if name in ("hmm", "gmm") and isinstance(res.proba, pd.DataFrame) and not res.proba.empty:
+            model_cfg = (cfg.get(name) or {})
+            # fallback to HMM config keys if not present for GMM
             hmm_cfg = (cfg.get("hmm") or {})
-            thr = float(hmm_cfg.get("prob_threshold", 0.7))
-            consec = int(hmm_cfg.get("min_duration", hmm_cfg.get("confirm_consecutive", 2)))
+            thr = float(model_cfg.get("prob_threshold", hmm_cfg.get("prob_threshold", 0.7)))
+            consec = int(model_cfg.get("confirm_consecutive", (cfg.get("ensemble") or {}).get("confirm_consecutive", 2)))
+            min_k = int(model_cfg.get("min_duration", hmm_cfg.get("min_duration", 3)))
             # confirm by probability
-            confirmed = confirm_by_probability(res.proba, threshold=thr, consecutive=int((cfg.get("ensemble") or {}).get("confirm_consecutive", consec)))
+            confirmed = confirm_by_probability(res.proba, threshold=thr, consecutive=consec)
             # Min-duration smoothing
-            smoothed = apply_min_duration(confirmed, k=int(hmm_cfg.get("min_duration", 3)))
-            res = RegimeResult(labels=smoothed, proba=res.proba, diagnostics={**(res.diagnostics or {}), "post": "applied"})
+            smoothed = apply_min_duration(confirmed, k=min_k)
+            res = RegimeResult(labels=smoothed, proba=res.proba, diagnostics={**(res.diagnostics or {}), "post": f"applied_{name}"})
 
         # Write labels as categorical names
-        label_series = res.labels.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
+        label_series_named = res.labels.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
         # Normalized display names to match downstream expectations
         col_label = {
             "hmm": "HMM",
             "gmm": "GMM",
             "kmeans": "KMeans",
             "rule": "Rule",
+            "hsmm": "HSMM",
         }.get(name, name.capitalize())
-        outputs[col_label] = label_series.to_frame(name=col_label)
+        # Backward-compatible plain label column
+        outputs[col_label] = label_series_named.to_frame(name=col_label)
+        # New schema: explicit *_Regime label column
+        outputs[col_label + "_Regime"] = label_series_named.to_frame(name=col_label + "_Regime")
         # probabilities
         if isinstance(res.proba, pd.DataFrame) and not res.proba.empty:
             prob_cols = {c: f"{col_label}_Prob_{i}" for i, c in enumerate(res.proba.columns)}
@@ -780,7 +813,7 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
 
     # Probability-based ensemble if ≥ 2 models with probabilities
     if len(prob_list) >= 2:
-        ens = ensemble_probs(prob_list)
+        ens = average_probabilities(prob_list)
         if not ens.empty:
             # Add named ensemble probability columns
             ens_named = ens.rename(columns={c: f"Ensemble_Prob_{i}" for i, c in enumerate(ens.columns)})
@@ -788,11 +821,99 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
             # Convert to labels and apply same stabilization as HMM using config
             raw_ens = ensemble_labels(ens)
             hmm_cfg = (cfg.get("hmm") or {})
-            thr = float(hmm_cfg.get("prob_threshold", 0.7))
-            consec = int((cfg.get("ensemble") or {}).get("confirm_consecutive", 2))
+            ens_cfg = (cfg.get("ensemble") or {})
+            thr = float(ens_cfg.get("prob_threshold", hmm_cfg.get("prob_threshold", 0.7)))
+            consec = int(ens_cfg.get("confirm_consecutive", 2))
+            min_k = int(ens_cfg.get("min_duration", hmm_cfg.get("min_duration", 3)))
             ens_conf = confirm_by_probability(ens, threshold=thr, consecutive=consec)
-            ens_smooth = apply_min_duration(ens_conf, k=int(hmm_cfg.get("min_duration", 3)))
-            out["Regime_Ensemble"] = ens_smooth.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
+            ens_smooth = apply_min_duration(ens_conf, k=min_k)
+            out["Ensemble_Regime"] = ens_smooth.astype("Int64").astype(str).map(lambda s: f"Regime_{s}")
+
+            # --- Validators: attach per-date flags for explainability -------
+            try:
+                flags = {}
+                # build switch indices from raw ensemble labels
+                raw_idx = np.where(raw_ens.values[1:] != raw_ens.values[:-1])[0]
+                # Pre-compute duration sanity on smoothed labels (string -> int)
+                smooth_int = ens_smooth.astype(int)
+                dur = duration_sanity(smooth_int)
+                # For each switch, compute Chow-like mean/variance tests around it
+                growth = data.get("F_Growth") if "F_Growth" in data.columns else None
+                infl = data.get("F_Inflation") if "F_Inflation" in data.columns else None
+                for si in raw_idx:
+                    date = ens.index[si + 1]
+                    test_g = chow_mean_variance_test(growth, si + 1, window=6) if growth is not None else {"p_value": 1.0, "passed": False}
+                    test_i = chow_mean_variance_test(infl, si + 1, window=6) if infl is not None else {"p_value": 1.0, "passed": False}
+                    flags[date] = {
+                        "duration": dur,
+                        "chow_var_growth": test_g,
+                        "chow_var_inflation": test_i,
+                    }
+                # Attach a column with dicts (dates with no switch receive last known flags)
+                val_series = pd.Series(index=out.index, dtype=object)
+                last = None
+                for ts in out.index:
+                    if ts in flags:
+                        last = flags[ts]
+                    val_series.loc[ts] = last if last is not None else {"duration": dur}
+                out["Validation_Flags"] = val_series
+            except Exception:
+                logger.debug("Failed to compute validation flags", exc_info=True)
+
+            # --- Explainability: save per-regime profiles --------------------
+            try:
+                import os, json
+                # Derive a primary regime series for profiling (Ensemble preferred, else HMM/GMM/HSMM)
+                primary = None
+                for c in ("Ensemble_Regime", "HMM_Regime", "GMM_Regime", "HSMM_Regime", "KMeans_Regime", "Rule_Regime"):
+                    if c in out.columns:
+                        primary = out[c]
+                        break
+                if primary is None:
+                    primary = out.get("Ensemble_Regime")
+                # Use factor columns F_* if present
+                factor_cols = [c for c in data.columns if isinstance(c, str) and c.startswith("F_")]
+                profiles = {}
+                if primary is not None and factor_cols:
+                    # Per-regime factor mean±std
+                    for g in primary.dropna().unique():
+                        mask = primary == g
+                        sl = data.loc[mask, factor_cols]
+                        if sl.empty:
+                            continue
+                        profiles[str(g)] = {
+                            "factor_mean": {f: float(sl[f].mean()) for f in factor_cols},
+                            "factor_std": {f: float(sl[f].std()) for f in factor_cols},
+                            "count": int(mask.sum()),
+                        }
+                    # Typical state duration from Ensemble smoothed labels if available
+                    try:
+                        ens_int = ens_smooth.astype(int)
+                        from src.models.validators import duration_sanity as _dur
+                        dur = _dur(ens_int)
+                        for k in ("mean", "median", "too_short_share"):
+                            profiles.setdefault("_meta", {})[k] = dur.get(k)
+                    except Exception:
+                        pass
+                    # Transition odds (approx): from HMM/HSMM probabilities if available
+                    # We approximate by counting transitions in primary
+                    try:
+                        trans = {}
+                        seq = primary.dropna().astype(str).values
+                        for i in range(1, len(seq)):
+                            if seq[i] != seq[i-1]:
+                                key = f"{seq[i-1]}->{seq[i]}"
+                                trans[key] = trans.get(key, 0) + 1
+                        profiles.setdefault("_meta", {})["transitions"] = trans
+                    except Exception:
+                        pass
+                    # Write JSON
+                    out_dir = os.path.join("Output", "diagnostics")
+                    os.makedirs(out_dir, exist_ok=True)
+                    with open(os.path.join(out_dir, "regime_profiles.json"), "w", encoding="utf-8") as fh:
+                        json.dump(profiles, fh, indent=2)
+            except Exception:
+                logger.debug("Failed to write regime profiles", exc_info=True)
 
             # --- Validators -------------------------------------------------
             # Duration sanity
@@ -811,7 +932,10 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
             out["Validation_Flags"] = [flags] * len(out)
     else:
         # Fallback: if no probability ensemble, use priority rule on labels
-        cols = [c for c in out.columns if c in ("HMM", "GMM", "KMeans", "Rule")]
+        # Prefer new *_Regime columns; fallback to legacy names
+        cols = [c for c in out.columns if c in ("HMM_Regime", "GMM_Regime", "KMeans_Regime", "Rule_Regime")]
+        if not cols:
+            cols = [c for c in out.columns if c in ("HMM", "GMM", "KMeans", "Rule")]
         def _ensemble(row):
             vals = row[cols].dropna().tolist()
             if not vals:
@@ -819,8 +943,19 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
             for v in vals:
                 if vals.count(v) >= 2:
                     return v
-            return row.get("HMM", vals[0])
+            # default preference order
+            return row.get("HMM_Regime", row.get("HMM", vals[0]))
         out["Regime_Ensemble"] = out.apply(_ensemble, axis=1)
+
+    # Hierarchical 4-way label based on msdyn cycle × F_Inflation
+    try:
+        cycle_col = "MSDyn_Regime" if "MSDyn_Regime" in out.columns else ("MSDyn" if "MSDyn" in out.columns else None)
+        if cycle_col and "F_Inflation" in data.columns:
+            hier = hierarchical_labels(out[cycle_col], data["F_Inflation"], inf_thresh=float((cfg.get("hierarchical") or {}).get("inflation_threshold", 0.0)))
+            if not hier.empty:
+                out["Regime_Hierarchical"] = hier
+    except Exception as exc:
+        logger.debug("Failed to build hierarchical labels: %s", exc)
 
     # Non-breaking validation (warnings only)
     try:
@@ -830,7 +965,6 @@ def fit_regimes(data: pd.DataFrame, features: List[str] | None = None, n_regimes
 
     return out
 
->>>>>>> Stashed changes
 def apply_ensemble_classification(data: pd.DataFrame, methods: List[str] = None) -> pd.Series:
     """
     Apply ensemble classification combining multiple methods.
@@ -914,3 +1048,4 @@ if __name__ == "__main__":
     print(f"\nRule-Based Regime Classification System created successfully!")
     print(f"Available regime types: {[r.value for r in RegimeType]}")
     print(f"Supports custom rules, weighted scoring, and transition analysis.")
+

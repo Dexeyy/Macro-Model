@@ -86,7 +86,7 @@ def group_features(df: pd.DataFrame) -> Dict[str, List[str]]:
     # Heuristic fallback for remaining columns
     infl_keywords = ("cpi", "infl", "ppi", "m2", "liqu")
     credit_keywords = ("spread", "risk", "nfc", "baml", "move")
-    housing_keywords = ("houst", "housing", "case", "mort")
+    housing_keywords = ("houst", "housing", "case", "mort", "permit")
     fx_comm_keywords = ("fx", "usd", "eur", "oil", "gold", "btc", "commod", "dcoil")
 
     for col in remaining_cols:

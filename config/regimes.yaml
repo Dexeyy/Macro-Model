@@ -1,16 +1,185 @@
-models: [rule, kmeans, hmm]
-hmm:
-  n_states_range: [2, 6]
-  covariance_type: full
-  min_duration: 3
-  prob_threshold: 0.7
 ensemble:
   confirm_consecutive: 2
+hmm:
+  covariance_type: full
+  min_duration: 3
+  n_states_range:
+  - 2
+  - 6
+  prob_threshold: 0.7
+models:
+- rule
+- gmm
+- hmm
 themes:
+  credit_risk: []
+  external: []
   growth: []
+  housing: []
   inflation: []
   liquidity: []
-  credit_risk: []
-  housing: []
-  external: []
-
+postprocess:
+  min_duration: 3
+  prob_threshold: 0.7
+  consecutive: 2
+run:
+  mode: retro
+  bundle: coincident
+pca:
+  enabled: false
+publication_lags:
+  RPI: 1
+  W875RX1: 1
+  DPCERA3M086SBEA: 1
+  CMRMTSPLx: 2
+  CMRMTSPL: 2
+  RETAILx: 1
+  RSAFS: 1
+  INDPRO: 1
+  IPFPNSS: 1
+  IPFINAL: 1
+  IPCONGD: 1
+  IPDCONGD: 1
+  IPNCONGD: 1
+  IPBUSEQ: 1
+  IPMAT: 1
+  IPDMAT: 1
+  IPNMAT: 1
+  IPMANSICS: 1
+  IPB51222S: 1
+  IPFUELS: 1
+  CUMFNS: 1
+  CLF16OV: 1
+  CE16OV: 1
+  UNRATE: 1
+  UEMPMEAN: 1
+  UEMPLT5: 1
+  UEMP5TO14: 1
+  UEMP15OV: 1
+  UEMP15T26: 1
+  UEMP27OV: 1
+  CLAIMSx: 1
+  ICSA: 1
+  PAYEMS: 1
+  USGOOD: 1
+  CES1021000001: 1
+  USCONS: 1
+  MANEMP: 1
+  DMANEMP: 1
+  NDMANEMP: 1
+  SRVPRD: 1
+  USTPU: 1
+  USWTRADE: 1
+  USTRADE: 1
+  USFIRE: 1
+  USGOVT: 1
+  CES0600000007: 1
+  AWOTMAN: 1
+  AWHMAN: 1
+  ACOGNO: 1
+  AMDMNOx: 1
+  AMDMNO: 1
+  ANDENOx: 1
+  ANDENO: 1
+  AMDMUOx: 1
+  AMDMUO: 1
+  BUSINVx: 2
+  BUSINV: 2
+  ISRATIOx: 2
+  ISRATIO: 2
+  UMCSENTx: 1
+  UMCSENT: 1
+  CES0600000008: 1
+  CES2000000008: 1
+  CES3000000008: 1
+  CONSPI: 1
+  WPSFD49207: 1
+  WPSFD49502: 1
+  WPSID61: 1
+  WPSID62: 1
+  PPICMM: 1
+  CPIAUCSL: 1
+  CPIAPPSL: 1
+  CPITRNSL: 1
+  CPIMEDSL: 1
+  CUSR0000SAC: 1
+  CUSR0000SAD: 1
+  CUSR0000SAS: 1
+  CPIULFSL: 1
+  CUSR0000SA0L2: 1
+  CUSR0000SA0L5: 1
+  PCEPI: 1
+  DDURRG3M086SBEA: 1
+  DNDGRG3M086SBEA: 1
+  DSERRG3M086SBEA: 1
+  M1SL: 1
+  M2SL: 1
+  M2REAL: 1
+  BOGMBASE: 1
+  TOTRESNS: 1
+  NONBORRES: 1
+  BUSLOANS: 1
+  REALLN: 1
+  NONREVSL: 1
+  SP500: 0
+  FEDFUNDS: 0
+  CP3Mx: 0
+  TB3MS: 0
+  TB6MS: 0
+  GS1: 0
+  GS5: 0
+  GS10: 0
+  AAA: 0
+  BAA: 0
+  COMPAPFFx: 0
+  COMPAPFF: 0
+  TB3SMFFM: 0
+  TB6SMFFM: 0
+  T1YFFM: 0
+  T5YFFM: 0
+  T10YFFM: 0
+  AAAFFM: 0
+  BAAFFM: 0
+  VIXCLSx: 0
+  VIXCLS: 0
+  HOUST: 1
+  HOUSTNE: 1
+  HOUSTMW: 1
+  HOUSTS: 1
+  HOUSTW: 1
+  PERMIT: 1
+  PERMITNE: 1
+  PERMITMW: 1
+  PERMITS: 1
+  PERMITW: 1
+  TWEXAFEGSMTHx: 0
+  TWEXAFEGSMTH: 0
+  EXSZUSx: 0
+  EXSZUS: 0
+  EXJPUSx: 0
+  EXJPUS: 0
+  EXUSUKx: 0
+  EXUSUK: 0
+  EXCAUSx: 0
+  EXCAUS: 0
+  OILPRICEx: 0
+  DCOILWTICO: 0
+series_types:
+  VIX: fast
+  VIXCLS: fast
+  MOVE: fast
+  DCOILWTICO: fast
+  ^MOVE: fast
+  CPIAUCSL: typical
+  INDPRO: typical
+  PCEPI: typical
+  PPICMM: typical
+  AAA: typical
+  BAA: typical
+  credit_spread: typical
+  CorporateBondSpread: typical
+  HOUST: typical
+  PERMIT: typical
+  EXJPUS: typical
+  TWEXAFEGSMTH: typical
+  NFCI: slow

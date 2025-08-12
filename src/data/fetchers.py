@@ -7,6 +7,7 @@ import requests
 from datetime import datetime
 from fredapi import Fred
 import yfinance as yf
+from config import config as cfg  # access FRED_ALIASES and TCODE_MAP
 
 # Set up logging
 logging.basicConfig(
@@ -26,6 +27,28 @@ def initialize_fred_api():
         logger.error(f"Error initializing FRED API: {e}")
         raise
 
+def _canonicalize_series_dict(series_dict: dict) -> dict:
+    """Normalize input mapping to {label->code} where label is canonical FRED ID.
+
+    Accepts either {code->desc} or {label->code}. Applies aliases from cfg.FRED_ALIASES.
+    """
+    out = {}
+    aliases = getattr(cfg, 'FRED_ALIASES', {}) or {}
+    for k, v in series_dict.items():
+        # If v looks like a FRED code (uppercase letters/numbers/underscore), treat as code
+        if isinstance(v, str) and v.replace('_', '').isalnum() and v.upper() == v:
+            code = v
+            label = k
+        else:
+            # Otherwise, k is the code and label; map aliases
+            code = aliases.get(k, k)
+            label = code
+        # apply alias for label too
+        label = aliases.get(label, label)
+        out[label] = code
+    return out
+
+
 def fetch_fred_series(series_dict, start_date, end_date):
     """
     Fetch multiple series from FRED.
@@ -44,18 +67,68 @@ def fetch_fred_series(series_dict, start_date, end_date):
     # Convert to dictionary if a list is provided
     if isinstance(series_dict, list):
         series_dict = {code: code for code in series_dict}
+
+    # Canonicalize mapping to {label->code}
+    try:
+        series_dict = _canonicalize_series_dict(series_dict)
+    except Exception:
+        pass
     
     for label, code in series_dict.items():
-        try:
-            logger.info(f"Fetching {label} ({code})...")
-            s = fred.get_series(code, observation_start=start_date, observation_end=end_date)
-            if s is not None and not s.empty:
-                data_list.append(s.rename(label))
-                logger.info(f"Successfully fetched {label}")
+        # Per-series retry with exponential backoff for rate limits and transient errors
+        max_tries = 5
+        delay = 1.0
+        last_exc = None
+        got = None
+        for attempt in range(1, max_tries + 1):
+            try:
+                logger.info(f"Fetching {label} ({code})... [attempt {attempt}/{max_tries}]")
+                s = fred.get_series(code, observation_start=start_date, observation_end=end_date)
+                if s is not None and not s.empty:
+                    got = s.rename(label)
+                    logger.info(f"Successfully fetched {label}")
+                    break
+                else:
+                    msg = f"No data returned for {label} ({code})"
+                    logger.warning(msg)
+            except Exception as e:
+                last_exc = e
+                # Heuristic: backoff on rate limiting or network-ish errors
+                emsg = str(e)
+                if any(tok in emsg for tok in ["Too Many Requests", "Rate Limit", "timed out", "Connection", "temporarily unavailable"]):
+                    time.sleep(delay)
+                    delay = min(delay * 2.0, 16.0)
+                    continue
+                # If clearly "does not exist", don't retry further
+                if "does not exist" in emsg:
+                    logger.error(f"Error fetching {label} ({code}): {e}")
+                    break
+                # Generic retry
+                time.sleep(delay)
+                delay = min(delay * 2.0, 16.0)
+        if got is not None:
+            data_list.append(got)
+        else:
+            # Special-case fallback: MOVE via Stooq if FRED unavailable
+            if code == "MOVE" or label == "MOVE":
+                try:
+                    from .fetchers import fetch_stooq_series  # local import to avoid cycles
+                except Exception:
+                    fetch_stooq_series = None
+                if fetch_stooq_series is not None:
+                    try:
+                        s2 = fetch_stooq_series("^MOVE")
+                        if s2 is not None and not s2.empty:
+                            s2m = s2.resample('ME').last().rename('^MOVE')
+                            data_list.append(s2m)
+                            logger.warning("FRED MOVE unavailable; using Stooq ^MOVE fallback")
+                            continue
+                    except Exception as fe:
+                        logger.debug("Stooq fallback for MOVE failed: %s", fe)
+            if last_exc is not None:
+                logger.error(f"Error fetching {label} ({code}) after retries: {last_exc}")
             else:
-                logger.warning(f"No data returned for {label} ({code})")
-        except Exception as e:
-            logger.error(f"Error fetching {label} ({code}): {e}")
+                logger.error(f"Failed to fetch {label} ({code}) after retries; skipping.")
     
     if not data_list:
         raise Exception("No data was fetched. Check API key and series codes.")
@@ -67,6 +140,51 @@ def fetch_fred_series(series_dict, start_date, end_date):
     except Exception as e:
         logger.error(f"Error creating macro_data_raw: {e}")
         raise
+
+
+def apply_fredmd_tcodes(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply FRED-MD transformation codes to columns per cfg.TCODE_MAP.
+
+    The transformation overwrites columns in place using canonical FRED IDs.
+    """
+    if df is None or df.empty:
+        return df
+    tmap = getattr(cfg, 'TCODE_MAP', {}) or {}
+    aliases = getattr(cfg, 'FRED_ALIASES', {}) or {}
+
+    def safe_log(s: pd.Series) -> pd.Series:
+        s = pd.to_numeric(s, errors='coerce')
+        s = s.where(s > 0)
+        return np.log(s)
+
+    out = df.copy()
+    for raw_key, tcode in tmap.items():
+        col = raw_key
+        # Map alias to actual present column name
+        col = aliases.get(col, col)
+        if col not in out.columns:
+            continue
+        s = pd.to_numeric(out[col], errors='coerce')
+        try:
+            if tcode == 1:
+                transformed = s
+            elif tcode == 2:
+                transformed = s.diff(1)
+            elif tcode == 4:
+                transformed = s.diff(4)
+            elif tcode == 5:
+                transformed = safe_log(s)
+            elif tcode == 6:
+                transformed = safe_log(s).diff(1)
+            elif tcode == 7:
+                transformed = safe_log(s).diff(1).diff(1)
+            else:
+                transformed = s
+            out[col] = transformed
+        except Exception:
+            # leave original if transform fails
+            pass
+    return out
 
 def fetch_stooq_series(ticker: str) -> pd.Series:
     """
@@ -257,30 +375,52 @@ def process_asset_data(data, label):
     try:
         if data is not None and not data.empty:
             logger.info(f"Processing data for {label} with columns: {data.columns.tolist()}")
-            
-            # Choose the correct price column
-            if 'Adj Close' in data.columns:
-                price_series = data['Adj Close']
-                logger.info(f"Using 'Adj Close' column for {label}")
-            elif 'Close' in data.columns:
-                price_series = data['Close']
-                logger.info(f"Using 'Close' column for {label}")
-            else:
-                # If no Adj Close or Close, use the first numeric column
-                numeric_cols = [col for col in data.columns if pd.api.types.is_numeric_dtype(data[col])]
-                if numeric_cols:
-                    price_series = data[numeric_cols[0]]
-                    logger.info(f"Using '{numeric_cols[0]}' column for {label} (fallback)")
+
+            # Normalize to a 1-D Series of prices
+            price_obj = None
+            # Handle MultiIndex columns from yfinance when multiple tickers used
+            if hasattr(data.columns, 'nlevels') and data.columns.nlevels > 1:
+                first_level = [lvl for lvl in ['Adj Close', 'Close'] if lvl in data.columns.get_level_values(0)]
+                if first_level:
+                    price_obj = data[first_level[0]]
+                    logger.info(f"Using '{first_level[0]}' column for {label}")
                 else:
-                    logger.error(f"No numeric columns found for {label}")
+                    # fallback: take first top-level column
+                    price_obj = data.xs(data.columns.get_level_values(0)[0], axis=1, level=0)
+            else:
+                if 'Adj Close' in data.columns:
+                    price_obj = data['Adj Close']
+                    logger.info(f"Using 'Adj Close' column for {label}")
+                elif 'Close' in data.columns:
+                    price_obj = data['Close']
+                    logger.info(f"Using 'Close' column for {label}")
+                else:
+                    # If no Adj Close or Close, use the first numeric column
+                    numeric_cols = [col for col in data.columns if pd.api.types.is_numeric_dtype(data[col])]
+                    if numeric_cols:
+                        price_obj = data[numeric_cols[0]]
+                        logger.info(f"Using '{numeric_cols[0]}' column for {label} (fallback)")
+                    else:
+                        logger.error(f"No numeric columns found for {label}")
+                        return None
+
+            # If still a DataFrame (e.g., single-column), reduce to Series
+            if isinstance(price_obj, pd.DataFrame):
+                if price_obj.shape[1] >= 1:
+                    price_series = price_obj.iloc[:, 0].rename(label)
+                else:
+                    logger.error(f"No usable price series extracted for {label}")
                     return None
-            
+            else:
+                price_series = price_obj.rename(label)
+
             # Check if we got valid data
             if price_series is None or price_series.empty:
                 logger.error(f"Price series for {label} is None or empty")
                 return None
-                
-            logger.info(f"Price series for {label} before cleaning: length={len(price_series)}, non-null={price_series.count()}")
+
+            non_null = int(price_series.notna().sum())
+            logger.info(f"Price series for {label} before cleaning: length={len(price_series)}, non-null={non_null}")
             
             # Forward fill any missing values (use .ffill() to avoid deprecation)
             price_series = price_series.ffill()

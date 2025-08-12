@@ -1,232 +1,230 @@
-# Macro Regime Analysis Model
+## Macro Regime Analysis Model (v2)
 
-A Python framework for analyzing macroeconomic regimes and their impact on asset performance.
+A production‑oriented framework for macroeconomic regime detection, probabilities, stability post‑processing, explainability, and Excel reporting.
 
-## Overview
+### Highlights
 
-This project provides tools to:
-- Fetch and process macroeconomic data (FRED) and asset prices (Yahoo Finance)
-- Engineer macro features and theme composites (F_Growth, F_Inflation, F_Liquidity, F_CreditRisk, F_Housing, F_External)
-- Fit multiple regime models (Rule, KMeans, HMM, optional GMM) and compute probabilities
-- Build probability-based ensemble regimes with stability post-processing
-- Analyze performance by regime and export diagnostics
-- Generate an Excel dashboard with clean, category-specific pages
+- Theme factor composites `F_*` (Growth, Inflation, Liquidity, CreditRisk, Housing, External); optional PCA `PC_*`
+- Pluggable models: Rule, KMeans, GMM, HMM, HSMM (fallback), MSDyn (Markov‑Switching on MacroMomentum)
+- Per‑model probabilities (`*_Prob_*`) + probability‑based ensemble with confirmation and min‑duration stabilizers
+- Validators and diagnostics: duration sanity, local mean/variance tests (Chow‑like), change‑point hints
+- Real‑time (“rt”; publication‑lag‑disciplined) and Retro (“retro”) feature modes
+- Excel dashboard: regime timeline, stacked probability strip, low‑confidence shading, per‑theme signature charts, KPI confidence
+- Performance analytics with regime separation scorecard (ANOVA) and portfolio helpers
 
-## Architecture
+---
 
-```
-Data (FRED, Yahoo) ──> Processing (resample, YoY/MoM, MAs, z-scores)
-                         └─> Theme Composites (F_*) & optional PCA (PC_*)
-                                      │
-                                      ▼
-                              Regime Models (Rule, KMeans, HMM, GMM)
-                                      │          └─ per‑model probabilities
-                                      ▼
-                              Ensemble (avg probs + confirmation + min‑duration)
-                                      │
-                                      ▼
-                        Performance Analytics (per‑regime metrics, scorecard)
-                                      │
-                                      ▼
-                         Excel Dashboard (theme pages + probabilities strip)
-```
-
-## Project Structure
+## Architecture (high‑level)
 
 ```
-macro-regime-model/
-├── data/                      # Data storage
-│   ├── raw/                   # Raw downloaded data
-│   └── processed/             # Processed datasets
-├── src/                       # Source code
-│   ├── data/                  # Data handling
-│   │   ├── __init__.py
-│   │   ├── fetchers.py        # Data fetching modules (FRED, Yahoo, etc.)
-│   │   └── processors.py      # Data processing functions
-│   ├── models/                # Analysis models
-│   │   ├── __init__.py
-│   │   ├── regime_classifier.py  # Regime classification models
-│   │   └── portfolio.py       # Portfolio construction
-│   ├── visualization/         # Visualization tools
-│   │   ├── __init__.py
-│   │   └── plots.py           # Plotting functions
-│   └── utils/                 # Utility functions
-│       ├── __init__.py
-│       └── helpers.py         # Helper functions
-├── notebooks/                 # Jupyter notebooks for exploration
-├── output/                    # Output files (charts, reports)
-├── config.py                  # Configuration settings
-├── main.py                    # Main entry point
-└── requirements.txt           # Dependencies
+FRED / Yahoo  →  Processing →  F_* / (optional) PC_*
+                                  │
+                                  ▼
+                   Models (Rule / KMeans / GMM / HMM / HSMM / MSDyn)
+                 per‑model labels + probabilities ( *_Prob_* )
+                                  │
+                                  ▼
+                Ensemble (average probs → confirm → min‑duration)
+                                  │
+                                  ▼
+        Validators (duration, Chow/Wald‑like, change‑points) → Diagnostics
+                                  │
+                                  ▼
+   Performance (regime scorecard) + Excel (timeline + prob strip + KPIs)
 ```
+
+---
 
 ## Installation
 
-1. Clone the repository:
-```
-git clone https://github.com/yourusername/macro-regime-model.git
-cd macro-regime-model
-```
-
-2. Install dependencies:
 ```
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables (optional):
-Create a `.env` file in the root directory with:
+Optional/extra packages used if available: `ruptures`, `hsmmlearn`, `pomegranate`.
+
+Set your FRED key (optional) in `.env`:
+
 ```
-FRED_API_KEY=your_fred_api_key
+FRED_API_KEY=your_key
 ```
 
-## Usage
+---
 
-### Quickstart (CLI)
+## Configuration (config/regimes.yaml)
 
-Install CLI helper:
-```
-pip install typer[all]
-```
+Sane defaults are applied automatically if the file is missing or partial.
 
-Run the full pipeline (equivalent to `python main.py`):
-```
-python cli.py run full
-```
+```yaml
+models: [rule, gmm, hmm]        # optionally include: hsmm, msdyn, kmeans
 
-Fit regimes and save merged output:
-```
-python cli.py regimes fit --models hmm gmm rule --use-pca false --n-regimes 4
-```
-
-Build the Excel dashboard with category pages:
-```
-python cli.py excel build \
-  --template src/excel/Macro Reg Template.xlsm \
-  --out Output/Macro_Reg_Report_with_category_dashboards.xlsm
-```
-
-### Using main.py
-```
-python main.py
-```
-This runs: fetch/process → fit regimes → analyze performance → visuals → portfolios.
-
-## Configuration
-
-Primary YAML config (optional): `config/regimes.yaml`
-```
-models: [rule, kmeans, hmm]
 hmm:
   n_states_range: [2, 6]
   covariance_type: full
-  min_duration: 3
-  prob_threshold: 0.7
+
+postprocess:
+  min_duration: 3               # minimum run length after confirmation
+  prob_threshold: 0.7           # probability required to start confirming a switch
+  consecutive: 2                # consecutive periods above threshold to confirm switch
+
 ensemble:
-  confirm_consecutive: 2
-themes:
+  confirm_consecutive: 2        # used when building ensemble labels
+
+run:
+  mode: retro                   # rt | retro (feature alignment)
+  bundle: coincident            # coincident | coincident_plus_leading
+
+pca:
+  enabled: false
+
+themes:                         # optional explicit theme column lists
   growth: []
   inflation: []
   liquidity: []
   credit_risk: []
   housing: []
   external: []
-# Optional flag (either top-level or themes.use_pca):
-use_pca: false
 ```
-Notes:
-- If the YAML file is missing, defaults are used and behavior is unchanged.
-- `use_pca: true` enables `PC_*` factor features in addition to `F_*`.
-- HMM min-duration and probability threshold stabilize labels; ensemble uses the same settings.
 
-## Economic Regimes
+Key behaviors toggled here:
+- Change models list (e.g., add `hsmm`, `msdyn`)
+- Adjust stabilizers (`min_duration`, `prob_threshold`, `consecutive`)
+- Switch between real‑time (`rt`) and `retro` features
+- Select feature bundle (`coincident` vs `coincident_plus_leading`)
 
-The framework identifies several key macroeconomic regimes:
+---
 
-1. **Recession**: Negative growth, high unemployment, often with inverted yield curve. Typically favors defensive assets like Treasuries and cash.
+## Real‑time vs Retro features
 
-2. **Stagflation**: Low/negative growth with high inflation. Typically favors commodities, TIPS, and real assets.
+- Retro: fully revised history
+- Real‑time: publication‑lag alignment via `LagAligner`; you may set per‑series lags under `publication_lags:` in `config/regimes.yaml` (optional). Both are persisted:
+  - `Data/processed/macro_features_retro.parquet`
+  - `Data/processed/macro_features_rt.parquet`
 
-3. **Overheating**: Strong growth with high inflation, late-cycle expansion. Typically favors commodities, value stocks, and short-duration assets.
+Policy for rolling z-scores (monthly):
+- fast/volatile (VIX, MOVE, oil): window=36, min_periods=18
+- typical macro (CPI YoY, INDPRO YoY, credit spreads): window=60, min_periods=24
+- slow/structural (NFCI): window=120, min_periods=36
+- unknown types: min_periods ≈ 0.4 × window (cap 36). Auto-tuner evaluates (36,18),(60,24),(120,36) by coverage/smoothness/low-flips.
 
-4. **Expansion**: Moderate growth with moderate inflation, "goldilocks" environment. Typically favors equities, corporate bonds, and cyclical sectors.
+Real-time discipline: (1) apply lags, (2) recompute transforms on lagged panel, (3) compute robust z and build factors. All rolling use past windows only (no look-ahead).
 
-5. **Recovery**: Positive growth with low inflation, early-cycle expansion. Typically favors growth stocks, credit, and cyclical sectors.
+Financial Conditions synonyms: `VIXCLS→VIX`, `^MOVE→MOVE`, and `CorporateBondSpread` from `credit_spread` or `BAA−AAA`.
 
-6. **Slowdown/Disinflation**: Low growth with falling inflation, pre-recession phase. Typically favors long-duration assets like Treasuries and defensive sectors.
+Diagnostics: per-factor coverage count/ratio and `low_coverage` flags; warnings for <50% coverage in first 24 months. Snapshot saved to `Output/diagnostics/coverage_snapshot.csv`.
 
-## Advanced Feature Engineering
+---
 
-The framework includes sophisticated feature engineering to enhance regime detection:
+## Pluggable Models
 
-### Yield Curve Dynamics
-- **YieldCurve_Slope**: Difference between 10Y and 2Y Treasury yields
-  - Positive: Normal yield curve (expansion)
-  - Negative: Inverted yield curve (recession signal)
-- **YieldCurve_Curvature**: Measures the non-linearity of the yield curve
-  - High positive: Steep in middle, flat at ends (mid-cycle)
-  - Negative: Humped yield curve (late cycle)
-- **YieldCurve_Slope_Mom**: Rate of change in yield curve slope
-  - Positive: Steepening yield curve (early expansion)
-  - Negative: Flattening yield curve (late cycle)
+- Rule: simple heuristics, one‑hot probabilities
+- KMeans: clustering with soft probabilities (distance‑based)
+- GMM: Gaussian mixture with full covariance + soft probabilities
+- HMM: hmmlearn with BIC model selection; smoothed probabilities; confirmation + min‑duration applied
+- HSMM: tries native HSMM libs; falls back to HMM + explicit duration enforcement
+- MSDyn: Markov‑Switching Dynamic Regression on MacroMomentum (mean of `F_Growth`,`F_Inflation`,`F_Liquidity`, or `PC_*`)
 
-### Inflation Expectations and Real Rates
-- **RealRate_10Y**: Nominal yield minus inflation expectations
-  - High positive: Restrictive monetary policy
-  - Negative: Accommodative policy, often during crises
-- **RealRate_10Y_Mom**: Change in real rates
-  - Rising: Tightening financial conditions
-  - Falling: Easing financial conditions
+Outputs include both legacy `<Model>` and `<Model>_Regime` label columns, and probability columns `<Model>_Prob_*` where supported.
 
-### Financial Conditions
-- **FinConditions_Composite**: Standardized average of financial stress indicators
-  - Positive: Tight financial conditions (stress)
-  - Negative: Easy financial conditions (complacency)
+---
 
-### Growth Momentum
-- **GDP_YoY_Mom**, **INDPRO_YoY_Mom**, **NFP_YoY_Mom**: Change in growth metrics
-  - Positive: Accelerating growth (early/mid expansion)
-  - Negative: Decelerating growth (late cycle/contraction)
+## Ensemble & Validators
 
-### Liquidity Measures
-- **M2_YoY**: Year-over-year change in money supply
-  - High: Expansionary monetary policy
-  - Low/Negative: Contractionary monetary policy
-- **RealM2_Growth**: Money supply growth adjusted for inflation
-  - High: Expansionary in real terms
-  - Low/Negative: Contractionary in real terms
+- Ensemble probabilities: average aligned matrices; row‑wise renormalize
+- Ensemble labels: argmax → probability confirmation (`prob_threshold`, `consecutive`) → min‑duration smoothing
+- Diagnostics recorded in `Validation_Flags` (per‑timestamp dict):
+  - `duration` stats (mean/median/min/too_short_share)
+  - Local mean/variance tests (Chow/Wald‑like) around each proposed switch
+  - (Optional) change‑point hints on `F_Growth` / `F_Inflation`
 
-## Extending the Framework
+---
 
-### Adding New Data Sources
+## Excel Dashboard
 
-Add new fetcher functions in `src/data/fetchers.py`.
+Generated by `write_excel_report` and `build_macro_dashboard`:
+- Regime timeline chart with stacked `Ensemble_Prob_*` probability strip (last 180 months)
+- Low‑confidence shading when `Ensemble_Confidence < 0.6`
+- Theme KPI cards include “Confidence: …%” (latest row‑wise max(Ensemble_Prob_*))
+- Per‑theme signature charts:
+  - Growth: Business cycle clock (GDP YoY vs UNRATE)
+  - Inflation: CPI contributions stacked + real policy rate
+  - Credit: IG vs HY proxy (BAA‑AAA), NFCI if present
+  - Housing: Permits vs Starts + mortgage rate
+  - FX/Commodities: WTI and Dollar Index (TWEX)
 
-### Implementing New Regime Classification Methods
+Outputs:
+- `Output/Macro_Reg_Report_with_category_dashboards.xlsm`
+- `Output/excel_charts/*.png`
 
-Add new classification methods in `src/models/regime_classifier.py`.
+---
 
-### Creating Custom Portfolio Strategies
+## Performance Analytics
 
-Add new portfolio construction methods in `src/models/portfolio.py`.
+Use `PerformanceAnalytics` to produce:
+- Regime separation scorecard (`Output/diagnostics/regime_scorecard.csv`): per‑regime mean/vol/Sharpe, max drawdown, ANOVA p‑value across regimes (monthly returns)
+- Portfolio helpers and visualization utilities
 
-### Adding New Advanced Features
+---
 
-Extend the `create_advanced_features` function in `src/data/processors.py` to include additional derived features.
+## CLI Quickstart
+
+Fit regimes (respects YAML `run.bundle` and `run.mode` unless overridden):
+
+```
+python -m cli regimes fit --mode rt --bundle coincident --models hmm gmm rule --n-regimes 4
+```
+
+Build Excel dashboard:
+
+```
+python -m cli excel build \
+  --template src/excel/Macro\ Reg\ Template.xlsm \
+  --out Output/Macro_Reg_Report_with_category_dashboards.xlsm
+```
+
+End‑to‑end (equivalent of `main.py`):
+
+```
+python -m cli run full
+```
+
+---
+
+## Outputs (key files)
+
+- Processed features
+  - `Data/processed/macro_features_retro.parquet`
+  - `Data/processed/macro_features_rt.parquet`
+- Regimes (labels + probabilities + validators)
+  - `Data/processed/macro_data_with_regimes.csv`
+- Diagnostics & Explainability
+  - `Output/diagnostics/regime_scorecard.csv`
+  - `Output/diagnostics/regime_profiles.json`
+- Excel & charts
+  - `Output/Macro_Reg_Report_with_category_dashboards.xlsm`
+  - `Output/excel_charts/*.png`
+
+---
+
+## Testing & CI
+
+Run the synthetic smoke tests and postprocess unit tests:
+
+```
+pytest -q
+```
+
+CI (GitHub Actions) runs `pytest -q` and `mypy` on push/PR to `main`.
+
+---
+
+## Contributing
+
+Issues and PRs welcome. Please run tests locally before opening a PR.
+
+---
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT
 
-## Output Artifacts
-
-Generated under `/Output` (and `/Data/processed`):
-- Processed data
-  - `Data/processed/macro_data_featured.csv`
-  - `Data/processed/macro_features.parquet` (raw + engineered + F_* + optional PC_*)
-  - `Data/processed/macro_data_with_regimes.csv` (labels + probabilities + Validation_Flags)
-- Performance diagnostics
-  - `Output/diagnostics/regime_scorecard.csv` (per‑regime mean/vol/Sharpe, max DD, ANOVA p‑value)
-- Charts and Excel
-  - `Output/excel_charts/*.png` (per‑theme images and dashboard plots)
-  - `Output/Macro_Reg_Report_with_category_dashboards.xlsm` (theme pages, tables at J3, probability strip)
-  - (Legacy) `Output/Macro_Reg_Report.xlsx` if using earlier workflow

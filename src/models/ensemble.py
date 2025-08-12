@@ -52,7 +52,7 @@ def align_states(df: pd.DataFrame, labels_col: str, reference: str = "F_Growth")
     return mapping
 
 
-def ensemble_probs(prob_mats: List[pd.DataFrame]) -> pd.DataFrame:
+def average_probabilities(prob_mats: List[pd.DataFrame]) -> pd.DataFrame:
     """Average aligned probability matrices.
 
     Expects each matrix to have columns named 'state_<i>' already aligned.

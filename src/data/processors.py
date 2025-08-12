@@ -1,8 +1,18 @@
-import pandas as pd
+﻿import pandas as pd
 import numpy as np
 import logging
 from sklearn.preprocessing import StandardScaler
 from typing import List, Dict, Union, Optional, Tuple
+import os
+from config import config  # configuration (FRED series, paths)
+from src.utils.contracts import validate_frame, ProcessedMacroFrame, PerformanceFrame
+from src.excel.excel_live import group_features
+from src.features.economic_indicators import build_theme_composites
+from src.features.pca_factors import fit_theme_pca
+from src.utils.helpers import load_yaml_config, get_regimes_config
+from src.utils.zscores import robust_zscore_rolling, pick_window_minp, default_window_minp_for_type
+from src.utils.factors import build_factor as public_build_factor
+from typing import Literal
 
 # Set up logging
 logging.basicConfig(
@@ -101,17 +111,18 @@ class LagAligner:
                     closest_date = valid_dates.max()
                     aligned_series[name] = series.loc[closest_date]
                 else:
-                    logger.warning(f"No data available for '{name}' before {effective_date}")
+                    # Early sample often lacks data; avoid log spam
+                    logger.debug(f"No data available for '%s' before %s", name, effective_date)
                     aligned_series[name] = np.nan
             else:
-                logger.warning(f"Series '{name}' is empty")
+                logger.debug(f"Series '%s' is empty", name)
                 aligned_series[name] = np.nan
         
         # Create DataFrame with aligned data
         self.aligned_data = pd.Series(aligned_series, name=target_date)
         return self.aligned_data
     
-    def align_all_dates(self, start_date=None, end_date=None, freq='M'):
+    def align_all_dates(self, start_date=None, end_date=None, freq='ME'):
         """
         Align data for a range of dates.
         
@@ -146,7 +157,7 @@ class LagAligner:
             if end_date is None:
                 end_date = all_dates.max()
         
-        # Create date range
+        # Create date range (month-end by default)
         date_range = pd.date_range(start=start_date, end=end_date, freq=freq)
         
         # Align data for each date
@@ -159,137 +170,128 @@ class LagAligner:
         self.aligned_data = pd.DataFrame(aligned_data_list)
         return self.aligned_data
 
-<<<<<<< Updated upstream
-def process_macro_data(macro_data_raw):
-=======
-import os
-from config import config  # added import at top earlier
-from src.utils.contracts import validate_frame, ProcessedMacroFrame, PerformanceFrame
-from src.excel.excel_live import group_features
-from src.features.economic_indicators import build_theme_composites
-from src.features.pca_factors import fit_theme_pca
-from src.utils.helpers import load_yaml_config
+
+def _get_publication_lags_from_yaml() -> Dict[str, int]:
+    """Best-effort load of per-series publication lags (in months) from YAML.
+
+    Expects a mapping under key 'publication_lags' like:
+      publication_lags:
+        CPIAUCSL: 1
+        UNRATE: 0
+    """
+    # Prefer unified regimes config loader to ensure consistent source
+    cfg = get_regimes_config() or {}
+    raw = cfg.get("publication_lags") or {}
+    if not isinstance(raw, dict):
+        return {}
+    # Ensure int months
+    out: Dict[str, int] = {}
+    for k, v in raw.items():
+        try:
+            out[str(k)] = int(v)
+        except Exception:
+            continue
+    try:
+        logger.info("Loaded %d publication lag entries", len(out))
+    except Exception:
+        pass
+    return out
+
+
+def apply_publication_lags(df: pd.DataFrame, lag_map: Optional[Dict[str, int]] = None) -> pd.DataFrame:
+    """Align a DataFrame to real-time availability using LagAligner.
+
+    - If lag_map is None, attempts to read from YAML; defaults to 0 if unknown.
+    - Works column-wise and returns a DataFrame of aligned values at monthly frequency.
+    """
+    if df is None or df.empty:
+        return df
+
+    # Ensure datetime index and monthly frequency ordering
+    data = df.copy()
+    if not isinstance(data.index, pd.DatetimeIndex):
+        try:
+            data.index = pd.to_datetime(data.index)
+        except Exception:
+            return df
+    data = data.sort_index()
+
+    if lag_map is None:
+        lag_map = _get_publication_lags_from_yaml()
+
+    aligner = LagAligner()
+    for col in data.columns:
+        try:
+            # Skip derived/engineered columns; only align raw/base series
+            name = str(col)
+            if (
+                name.startswith("F_") or name.startswith("PC_") or
+                name.endswith("_YoY") or name.endswith("_MoM") or
+                "_MA" in name or name.endswith("_ZScore")
+            ):
+                continue
+            series = data[col]
+            # Default to 0 months if not specified
+            lag_months = int(lag_map.get(col, 0))
+            aligner.add_series(col, series, lag_months=lag_months)
+        except Exception:
+            # Skip non-series-like columns silently
+            continue
+
+    aligned = aligner.align_all_dates(start_date=data.index.min(), end_date=data.index.max(), freq="ME")
+    # Preserve original column order where possible
+    if not aligned.empty:
+        # Join aligned base series back into full feature set
+        base_cols = [c for c in data.columns if c in aligned.columns]
+        out = data.copy()
+        out[base_cols] = aligned[base_cols]
+        # Fallback: if a base column became entirely NaN after alignment, restore original
+        fully_nan_cols = [c for c in base_cols if out[c].notna().sum() == 0 and data[c].notna().sum() > 0]
+        if fully_nan_cols:
+            logger.warning("RT alignment produced all-NaN for %d columns; restoring unlagged values: %s",
+                           len(fully_nan_cols), fully_nan_cols[:8])
+            for c in fully_nan_cols:
+                out[c] = data[c]
+        out.index.name = data.index.name
+        return out
+    return data
+
 
 def process_macro_data(macro_data_raw: pd.DataFrame) -> pd.DataFrame:
-    """Clean & enrich raw macro series.
-
-    Steps
-    -----
-    1.  Monthly resample (end-of-month).
-    2.  Compute *YoY* and *MoM* % changes for every **original** series listed in
-        ``config.FRED_SERIES`` that exists in the dataset.
-    3.  Rolling moving-averages (3- and 6-month) for every numeric column that
-        *already* contains a YoY or MoM value (to avoid averaging the raw price
-        levels of different scales).
-    4.  24-month rolling z-score for all numeric columns.
->>>>>>> Stashed changes
+    """Clean & enrich raw macro series for downstream modeling and Excel dashboards.
+    Steps:
+    - Resample to month-end and forward-fill
+    - Compute YoY and MoM for raw series in config.FRED_SERIES
+    - Add 3M and 6M moving averages for YoY/MoM series
+    - Add 24M rolling z-score for all numeric columns
+    - Provide common alias columns (e.g., CPI_YoY, GDP_YoY)
+    - Build per-theme composites and optional PCA factors
+    - Persist a parquet snapshot for reuse
     """
-    Process raw macro data:
-    - Resample to monthly frequency
-    - Calculate YoY and MoM changes
-    - Calculate moving averages
-    - Calculate Z-scores
-    
-    Args:
-        macro_data_raw: Raw macro data from FRED
-        
-    Returns:
-        DataFrame with processed macro data
-    """
-    try:
-        # Resample to monthly frequency
-        macro_data_monthly = macro_data_raw.resample('M').last()
-        macro_data_monthly = macro_data_monthly.ffill()
-        
-        logger.info("Successfully resampled data to monthly frequency")
-        
-        # Calculate YoY and MoM changes
-        for col in ['CPI', 'CoreCPI', 'PPI', 'GDP', 'NFP', 'RetailSales', 'INDPRO', 'WageGrowth']:
-            if col in macro_data_monthly.columns:
-                try:
-                    macro_data_monthly[f'{col}_YoY'] = macro_data_monthly[col].pct_change(12) * 100
-                    macro_data_monthly[f'{col}_MoM'] = macro_data_monthly[col].pct_change(1) * 100
-                    logger.info(f"Successfully calculated changes for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating changes for {col}: {e}")
-
-<<<<<<< Updated upstream
-        # Calculate GDP Gap
-        if 'GDP' in macro_data_monthly.columns and 'RealPotentialGDP' in macro_data_monthly.columns:
-            try:
-                macro_data_monthly['GDP_Gap'] = (
-                    (macro_data_monthly['GDP'] / macro_data_monthly['RealPotentialGDP']) - 1
-                ) * 100
-                logger.info("Successfully calculated GDP Gap")
-            except Exception as e:
-                logger.warning(f"Error calculating GDP Gap: {e}")
-=======
-    # ------------------------------------------------------------------
-    # 1. Resample to month-end and forward-fill
-    # ------------------------------------------------------------------
     monthly = macro_data_raw.resample("ME").last().ffill()
->>>>>>> Stashed changes
 
-        # Calculate moving averages
-        for col in ['UNRATE', 'CPI_YoY', 'UMCSENT']:
-            if col in macro_data_monthly.columns:
-                try:
-                    macro_data_monthly[f'{col}_3M_MA'] = macro_data_monthly[col].rolling(window=3, min_periods=1).mean()
-                    macro_data_monthly[f'{col}_6M_MA'] = macro_data_monthly[col].rolling(window=6, min_periods=1).mean()
-                    logger.info(f"Successfully calculated moving averages for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating moving averages for {col}: {e}")
+    fred_codes = list(getattr(config, "FRED_SERIES", {}).keys())
+    # Build transforms in a dict to avoid fragmentation and silence pct_change fill warnings
+    _new_tf_cols: Dict[str, pd.Series] = {}
+    for code in fred_codes:
+        if code in monthly.columns:
+            try:
+                s = monthly[code]
+                _new_tf_cols[f"{code}_YoY"] = s.pct_change(12, fill_method=None)
+                _new_tf_cols[f"{code}_MoM"] = s.pct_change(1, fill_method=None)
+            except Exception as exc:
+                logger.warning("YoY/MoM calc failed for %s: %s", code, exc)
+    if _new_tf_cols:
+        monthly = monthly.join(pd.DataFrame(_new_tf_cols), how="left")
 
-        # Calculate Z-scores
-        for col in macro_data_monthly.columns:
-            if pd.api.types.is_numeric_dtype(macro_data_monthly[col]):
-                try:
-                    rolling_mean = macro_data_monthly[col].rolling(window=24, min_periods=1).mean()
-                    rolling_std = macro_data_monthly[col].rolling(window=24, min_periods=1).std()
-                    
-                    # Safe division to handle zeros in std
-                    macro_data_monthly[f'{col}_ZScore'] = np.where(
-                        rolling_std != 0,
-                        (macro_data_monthly[col] - rolling_mean) / rolling_std,
-                        0
-                    )
-                    logger.info(f"Successfully calculated Z-score for {col}")
-                except Exception as e:
-                    logger.warning(f"Error calculating Z-score for {col}: {e}")
-
-<<<<<<< Updated upstream
-        # Drop NaNs
-        macro_data_featured = macro_data_monthly.dropna(
-            subset=[col for col in macro_data_monthly.columns if 'YoY' in col or 'MA' in col],
-            how='all'
-        )
-        
-        logger.info("Successfully created macro_data_featured")
-        return macro_data_featured
-    
-    except Exception as e:
-        logger.error(f"Error in data processing: {e}")
-        raise
-
-def create_advanced_features(data):
-=======
-    # ------------------------------------------------------------------
-    # 3. Moving averages for rate/percentage series (YoY / MoM columns)
-    # ------------------------------------------------------------------
     pct_cols = [c for c in monthly.columns if c.endswith("_YoY") or c.endswith("_MoM")]
     if pct_cols:
-        roll3 = monthly[pct_cols].rolling(3, min_periods=1).mean()
-        roll3.columns = [f"{c}_3M_MA" for c in pct_cols]
-        roll6 = monthly[pct_cols].rolling(6, min_periods=1).mean()
-        roll6.columns = [f"{c}_6M_MA" for c in pct_cols]
+        roll3 = monthly[pct_cols].rolling(3, min_periods=1).mean().add_suffix("_3M_MA")
+        roll6 = monthly[pct_cols].rolling(6, min_periods=1).mean().add_suffix("_6M_MA")
         monthly = monthly.join(roll3, how="left").join(roll6, how="left")
 
-    # ------------------------------------------------------------------
-    # 4. 24-month rolling z-score for all numeric columns
-    #    Build in a dict and join once to avoid fragmentation warnings
-    # ------------------------------------------------------------------
-    zscore_cols = {}
     numeric_cols = [c for c in monthly.columns if pd.api.types.is_numeric_dtype(monthly[c])]
+    zscore_cols: Dict[str, pd.Series] = {}
     for col in numeric_cols:
         mean24 = monthly[col].rolling(24, min_periods=1).mean()
         std24 = monthly[col].rolling(24, min_periods=1).std()
@@ -298,49 +300,39 @@ def create_advanced_features(data):
     if zscore_cols:
         monthly = monthly.join(pd.DataFrame(zscore_cols), how="left")
 
-    # Provide simple aliases expected elsewhere in the codebase
-    alias_map = {
-        "CPI_YoY": "CPIAUCSL_YoY",
-        "GDP_YoY": "GDPC1_YoY",
-    }
+    alias_map = {"CPI_YoY": "CPIAUCSL_YoY", "GDP_YoY": "GDPC1_YoY"}
     for alias, source in alias_map.items():
         if alias not in monthly.columns and source in monthly.columns:
             monthly[alias] = monthly[source]
 
-    logger.info("process_macro_data: finished feature engineering (%d cols)", len(monthly.columns))
-
-    # Non-breaking validation (warnings only)
     try:
         validate_frame(monthly, ProcessedMacroFrame, validate=False, where="process_macro_data")
     except Exception:
-        # Should not raise when validate=False, but guard anyway
         logger.debug("ProcessedMacroFrame validation raised unexpectedly", exc_info=True)
 
-    # ------------------------------------------------------------------
-    # Build and persist per-theme composites alongside raw features
-    # ------------------------------------------------------------------
     try:
         mapping = group_features(monthly)
-        # Convert dashboard-oriented group names to canonical theme keys
         theme_key_map = {
             "Growth & Labour": "growth",
-            "Inflation & Liquidity": "inflation",  # liquidity will be captured by keywords too
+            "Inflation & Liquidity": "inflation",
             "Credit & Risk": "credit_risk",
             "Housing": "housing",
             "FX & Commodities": "external",
         }
-        canonical_mapping = {}
+        canonical_mapping: Dict[str, List[str]] = {}
         for k, cols in mapping.items():
             canon = theme_key_map.get(k, k)
             canonical_mapping.setdefault(canon, []).extend(cols)
 
+        from src.features.economic_indicators import build_theme_composites
         composites = build_theme_composites(monthly, canonical_mapping)
-        features_with_f = monthly.join(composites, how="left")
+        base_features = monthly.join(composites, how="left")
 
-        # Optional PCA per theme (controlled by YAML config: use_pca)
         cfg = load_yaml_config() or {}
         use_pca = bool((cfg.get("themes") or {}).get("use_pca") or cfg.get("use_pca"))
+        features_with_f = base_features
         if use_pca:
+            # Optional PCA hooks (not enabled by default)
             pca_map = {
                 "growth": "PC_Growth",
                 "inflation": "PC_Inflation",
@@ -349,26 +341,158 @@ def create_advanced_features(data):
                 "housing": "PC_Housing",
                 "external": "PC_External",
             }
-            for theme_key, pc_name in pca_map.items():
-                cols = canonical_mapping.get(theme_key, [])
-                if not cols:
-                    continue
-                pc1, _params = fit_theme_pca(features_with_f, cols, n_components=1)
-                features_with_f[pc_name] = pc1
-        # Save parquet with raw + engineered + F_*
-        import os
-        out_path = os.path.join("Data", "processed", "macro_features.parquet")
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        features_with_f.to_parquet(out_path)
-        logger.info("Saved macro features with composites to %s", out_path)
+            # Placeholder for PCA injection if enabled later
+            features_with_f = base_features  # keep as-is for now
+
+        # Persist legacy combined parquet for backward compatibility
+        legacy_path = os.path.join("Data", "processed", "macro_features.parquet")
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        features_with_f.to_parquet(legacy_path)
+        logger.info("Saved macro features (legacy) to %s", legacy_path)
+
+        # Build and persist both retro and real-time advanced feature sets
+        try:
+            features_retro = create_advanced_features(features_with_f, mode="retro")
+            features_rt = create_advanced_features(features_with_f, mode="rt")
+            out_dir = os.path.join("Data", "processed")
+            os.makedirs(out_dir, exist_ok=True)
+            retro_path = os.path.join(out_dir, "macro_features_retro.parquet")
+            rt_path = os.path.join(out_dir, "macro_features_rt.parquet")
+            features_retro.to_parquet(retro_path)
+            features_rt.to_parquet(rt_path)
+            logger.info("Saved retro features -> %s", retro_path)
+            logger.info("Saved real-time features -> %s", rt_path)
+        except Exception as sub_exc:
+            logger.warning("Failed to create/save RT/retro feature sets: %s", sub_exc)
     except Exception as exc:
         logger.warning("Failed to build/persist theme composites: %s", exc)
         features_with_f = monthly
 
     return features_with_f
 
-def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
->>>>>>> Stashed changes
+def create_advanced_features(data: pd.DataFrame, mode: str = "retro") -> pd.DataFrame:
+    # This function is defined later in the file with full RT discipline and factor rebuild.
+    # Keep a thin delegator here if earlier imports reference it.
+    return create_advanced_features.__wrapped__(data, mode)  # type: ignore
+
+def _harmonize_financial_condition_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename common synonyms for Financial Conditions inputs in-place safe copy.
+
+    - If 'VIX' missing and 'VIXCLS' present -> rename VIXCLS -> VIX
+    - If 'MOVE' missing and '^MOVE' present -> rename '^MOVE' -> MOVE
+    - CorporateBondSpread mapping:
+        * If 'CorporateBondSpread' missing and 'credit_spread' exists, copy it
+        * Else if both 'BAA' and 'AAA' exist, create CorporateBondSpread = BAA - AAA
+    """
+    out = df.copy()
+    if "VIX" not in out.columns and "VIXCLS" in out.columns:
+        out["VIX"] = pd.to_numeric(out["VIXCLS"], errors="coerce")
+    if "MOVE" not in out.columns and "^MOVE" in out.columns:
+        out["MOVE"] = pd.to_numeric(out["^MOVE"], errors="coerce")
+    if "CorporateBondSpread" not in out.columns:
+        if "credit_spread" in out.columns:
+            out["CorporateBondSpread"] = pd.to_numeric(out["credit_spread"], errors="coerce")
+        elif "BAA" in out.columns and "AAA" in out.columns:
+            try:
+                out["CorporateBondSpread"] = pd.to_numeric(out["BAA"], errors="coerce") - pd.to_numeric(out["AAA"], errors="coerce")
+            except Exception:
+                pass
+    return out
+
+
+def _series_type_of(name: str, cfg: Optional[Dict] = None) -> Optional[str]:
+    """Lookup series type bucket from YAML config (fast/typical/slow)."""
+    # Normalize transformed names to base
+    base = str(name)
+    for suf in ("_YoY", "_MoM", "_3M_MA", "_6M_MA", "_MA3_YoY", "_QoQAnn", "_ZScore"):
+        if base.endswith(suf):
+            base = base[: -len(suf)]
+            break
+    bucket_map = None
+    if cfg and isinstance(cfg.get("series_types"), dict):
+        bucket_map = cfg.get("series_types")
+    elif cfg and isinstance(cfg.get("zscore"), dict) and isinstance(cfg["zscore"].get("series_types"), dict):
+        bucket_map = cfg["zscore"]["series_types"]
+    if isinstance(bucket_map, dict):
+        t = bucket_map.get(base)
+        if isinstance(t, str):
+            return t
+    return None
+
+
+def _choose_window_params(col: str, s: pd.Series, cfg: Optional[Dict]) -> Dict[Literal["window", "min_periods"], int]:
+    series_type = _series_type_of(col, cfg)
+    if series_type:
+        return default_window_minp_for_type(series_type)
+    return pick_window_minp(s)
+
+
+def _build_factor(
+    df: pd.DataFrame,
+    bases: list[str],
+    *,
+    mode: Literal["RT", "RETRO"],
+    z_window: int | None = None,
+    z_min: int | None = None,
+    min_k: int = 2,
+) -> tuple[pd.Series, list[str], pd.Series]:
+    """Transform-adaptive factor builder with robust rolling z and coverage-aware averaging.
+
+    Returns
+    - factor: averaged robust z across chosen cols (NaN where coverage < min_k)
+    - used_cols: resolved input column names that existed and were non-constant
+    - coverage: per-date count of non-NaN inputs used
+    """
+    cfg = load_yaml_config() or {}
+    priority_rt = ["_YoY", "_QoQAnn", "_MA3_YoY", "_MoM", ""]
+    priority_retro = ["_YoY", "_MA3_YoY", "_QoQAnn", "_MoM", ""]
+    priority = priority_rt if str(mode).upper() == "RT" else priority_retro
+
+    resolved: list[str] = []
+    for base in bases:
+        chosen = None
+        for suffix in priority:
+            cand = f"{base}{suffix}"
+            if cand in df.columns:
+                ser = pd.to_numeric(df[cand], errors="coerce")
+                if ser.notna().any():
+                    chosen = cand
+                    break
+        if chosen is None and base in df.columns:
+            # Fallback to base level
+            if pd.to_numeric(df[base], errors="coerce").notna().any():
+                chosen = base
+        if chosen is not None:
+            resolved.append(chosen)
+
+    if not resolved:
+        return pd.Series(index=df.index, dtype=float), [], pd.Series(0, index=df.index, dtype="Int64")
+
+    # Compute robust z per series
+    z_cols: dict[str, pd.Series] = {}
+    for col in resolved:
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.nunique(dropna=True) <= 1:
+                    continue
+        params = {"window": z_window, "min_periods": z_min}
+        if z_window is None or z_min is None:
+            picked = _choose_window_params(col, s, cfg)
+            params = {"window": int(z_window or picked["window"]), "min_periods": int(z_min or picked["min_periods"])}
+        z = robust_zscore_rolling(s, window=int(params["window"]), min_periods=int(params["min_periods"]))
+        z_cols[col] = z
+
+    if not z_cols:
+        return pd.Series(index=df.index, dtype=float), [], pd.Series(0, index=df.index, dtype="Int64")
+
+    Z = pd.concat(z_cols, axis=1)
+    coverage = Z.notna().sum(axis=1)
+    factor = Z.mean(axis=1)
+    factor = factor.where(coverage >= int(min_k))
+    return factor.astype(float), list(z_cols.keys()), coverage.astype("Int64")
+
+
+def create_advanced_features(data: pd.DataFrame, mode: str = "retro") -> pd.DataFrame:
+
     """
     Create advanced macroeconomic features for regime detection.
     
@@ -379,8 +503,280 @@ def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
         DataFrame with added advanced features
     """
     try:
-        # Create a copy of the data to avoid modifying the original
-        result_data = data.copy()
+        # Normalize to monthly index first to ensure consistent transforms
+        base = data.copy()
+        if not isinstance(base.index, pd.DatetimeIndex):
+            try:
+                base.index = pd.to_datetime(base.index)
+            except Exception:
+                pass
+        base = base.sort_index()
+        try:
+            base = base.resample("ME").last()
+            base = base.ffill()
+        except Exception:
+            # if resample fails, proceed with original index
+            pass
+        # Align to publication lags if requested (real-time track)
+        rt_mode = isinstance(mode, str) and mode.lower() in ("rt", "real-time", "realtime")
+        if rt_mode:
+            try:
+                base = apply_publication_lags(base)
+                logger.info("Applied publication-lag alignment for real-time feature set")
+            except Exception as exc:
+                logger.warning("Lag alignment failed; proceeding without alignment: %s", exc)
+
+        # Create a working copy for feature engineering
+        result_data = base.copy()
+
+        # In true real-time mode, recompute transforms and composites from the aligned raw panel
+        if rt_mode:
+            try:
+                # Drop any previously computed derived columns so we can rebuild them on aligned raw
+                drop_cols = [
+                    c for c in result_data.columns
+                    if (
+                        c.endswith("_YoY") or c.endswith("_MoM") or
+                        c.endswith("_3M_MA") or c.endswith("_6M_MA") or
+                        c.endswith("_ZScore") or c == "CPI_YoY"
+                    ) and not c.startswith("F_")
+                ]
+                if drop_cols:
+                    result_data = result_data.drop(columns=drop_cols, errors="ignore")
+
+                # Recompute YoY/MoM for configured FRED series on aligned data (batched to avoid fragmentation)
+                fred_codes = list(getattr(config, "FRED_SERIES", {}).keys())
+                _rt_tf_cols: Dict[str, pd.Series] = {}
+                for code in fred_codes:
+                    if code in result_data.columns:
+                        try:
+                            s = pd.to_numeric(result_data[code], errors="coerce").reindex(result_data.index)
+                            s = s.ffill(limit=1)
+                            _rt_tf_cols[f"{code}_YoY"] = s.pct_change(12, fill_method=None)
+                            _rt_tf_cols[f"{code}_MoM"] = s.pct_change(1, fill_method=None)
+                        except Exception as exc:
+                            logger.debug("RT YoY/MoM calc failed for %s: %s", code, exc)
+                if _rt_tf_cols:
+                    result_data = result_data.join(pd.DataFrame(_rt_tf_cols), how="left")
+
+                # Rolling 3M/6M means for rate series
+                pct_cols = [c for c in result_data.columns if c.endswith("_YoY") or c.endswith("_MoM")]
+                if pct_cols:
+                    roll3 = result_data[pct_cols].rolling(3, min_periods=1).mean().add_suffix("_3M_MA")
+                    roll6 = result_data[pct_cols].rolling(6, min_periods=1).mean().add_suffix("_6M_MA")
+                    result_data = result_data.join(roll3, how="left").join(roll6, how="left")
+
+                # Restore common aliases expected elsewhere
+                alias_map = {"CPI_YoY": "CPIAUCSL_YoY", "GDP_YoY": "GDPC1_YoY"}
+                for alias, source in alias_map.items():
+                    if alias not in result_data.columns and source in result_data.columns:
+                        result_data[alias] = result_data[source]
+
+                # Provide widely used engineered helpers used by themes
+                if "BAA" in result_data.columns and "AAA" in result_data.columns and "credit_spread" not in result_data.columns:
+                    try:
+                        result_data["credit_spread"] = pd.to_numeric(result_data["BAA"], errors="coerce") - pd.to_numeric(result_data["AAA"], errors="coerce")
+                    except Exception:
+                        pass
+
+                # Recompute z-scores later via factor builder; skip full-matrix legacy ZScore columns
+
+                # Rebuild theme composites F_* from aligned inputs, with guarded backfill for sparse families
+                try:
+                    mapping = group_features(result_data)
+                    theme_key_map = {
+                        "Growth & Labour": "growth",
+                        "Inflation & Liquidity": "inflation",
+                        "Credit & Risk": "credit_risk",
+                        "Housing": "housing",
+                        "FX & Commodities": "external",
+                    }
+                    canonical_mapping: Dict[str, List[str]] = {}
+                    for k, cols in mapping.items():
+                        canon = theme_key_map.get(k, k)
+                        canonical_mapping.setdefault(canon, []).extend(cols)
+
+                    # Optional: if critical families are empty in RT, merge retro/base just for those inputs
+                    try:
+                        # Track columns prior to backfill so we can recompute transforms for any newly added bases
+                        _cols_before_backfill = set(result_data.columns)
+                        families = {
+                                "inflation": [
+                                    "CPIAUCSL", "WPSFD49207", "WPSFD49502", "WPSID61", "WPSID62", "PPICMM"
+                                ],
+                                "credit": [
+                                    "AAA", "BAA"
+                                ],
+                                "housing": [
+                                    "HOUST", "HOUSTNE", "HOUSTMW", "HOUSTS", "HOUSTW",
+                                    "PERMIT", "PERMITNE", "PERMITMW", "PERMITS", "PERMITW",
+                                ],
+                        }
+                        # 1) Try retro backfill
+                        retro_path = os.path.join("Data", "processed", "macro_features_retro.parquet")
+                        retro_df = pd.read_parquet(retro_path) if os.path.exists(retro_path) else None
+                        # 2) If still empty, try base macro_features (fresh fetch)
+                        base_path = os.path.join("Data", "processed", "macro_features.parquet")
+                        base_df = pd.read_parquet(base_path) if os.path.exists(base_path) else None
+                        touched_bases: set[str] = set()
+                        for fam, base_list in families.items():
+                            # Evaluate coverage using any of these bases (even if missing entirely)
+                            present_cols = [c for c in base_list if c in result_data.columns]
+                            has_any_data = bool(present_cols) and result_data[present_cols].notna().sum().sum() > 0
+                            if not has_any_data:
+                                backfilled = False
+                                # Try retro then base; add columns if missing, or replace if empty
+                                if retro_df is not None:
+                                    for c in base_list:
+                                        if c in retro_df.columns:
+                                            if c not in result_data.columns or result_data.get(c, pd.Series(dtype=float)).notna().sum() == 0:
+                                                result_data[c] = retro_df[c]
+                                                backfilled = True
+                                                touched_bases.add(c)
+                                if not backfilled and base_df is not None:
+                                    for c in base_list:
+                                        if c in base_df.columns:
+                                            if c not in result_data.columns or result_data.get(c, pd.Series(dtype=float)).notna().sum() == 0:
+                                                result_data[c] = base_df[c]
+                                                backfilled = True
+                                                touched_bases.add(c)
+                                if backfilled:
+                                    logger.warning("Backfilled %s family from retro/base for composite stabilization", fam)
+                        # Recompute transforms for any touched bases (added or replaced)
+                        if touched_bases:
+                            _rt_extra_tf: Dict[str, pd.Series] = {}
+                            for code in sorted(touched_bases):
+                                try:
+                                    if code in result_data.columns:
+                                        s = pd.to_numeric(result_data[code], errors="coerce").reindex(result_data.index)
+                                        s = s.ffill(limit=1)
+                                        if s.notna().any():
+                                            _rt_extra_tf[f"{code}_YoY"] = s.pct_change(12, fill_method=None)
+                                            _rt_extra_tf[f"{code}_MoM"] = s.pct_change(1, fill_method=None)
+                                except Exception:
+                                    continue
+                            if _rt_extra_tf:
+                                result_data = result_data.join(pd.DataFrame(_rt_extra_tf), how="left")
+                    except Exception:
+                        logger.debug("Family backfill guard skipped", exc_info=True)
+
+                    # Build transform-adaptive F_* factors using robust z and coverage awareness
+                    existing_f = [c for c in result_data.columns if c.startswith("F_")]
+                    if existing_f:
+                        result_data = result_data.drop(columns=existing_f, errors="ignore")
+                    # Harmonize financial condition names prior to building
+                    result_data = _harmonize_financial_condition_names(result_data)
+
+                    # Define compact, strong base lists per factor (coverage-aware at build)
+                    bases_map: Dict[str, list[str]] = {
+                        "F_Growth": ["INDPRO", "PAYEMS", "GDPC1", "CUMFNS"],
+                        "F_Inflation": ["CPIAUCSL", "PCEPI", "PPICMM"],
+                        "F_CreditRisk": ["AAA", "BAA", "credit_spread"],
+                        # Include national + regionals to maximize RT coverage
+                        "F_Housing": [
+                            "HOUST", "PERMIT",
+                            "HOUSTNE", "HOUSTMW", "HOUSTS", "HOUSTW",
+                            "PERMITNE", "PERMITMW", "PERMITS", "PERMITW",
+                        ],
+                        "F_External": ["DCOILWTICO", "TWEXAFEGSMTH", "EXJPUS"],
+                    }
+
+                    # Build each factor and collect coverage diagnostics
+                    coverage_diag = {}
+                    used_cols_log = {}
+                    # Load cfg once for logging/tuning
+                    cfg = load_yaml_config() or {}
+                    for fname, bases in bases_map.items():
+                        f, used_cols, cov = public_build_factor(
+                            result_data, bases,
+                            mode="RT" if rt_mode else "RETRO",
+                            z_window=None, z_min=None,
+                            min_k=2,
+                        )
+                        # bridge single-month gaps
+                        result_data[fname] = f.ffill(limit=1)
+                        coverage_diag[fname] = pd.DataFrame({
+                            "count": cov,
+                            "ratio": cov.astype(float) / max(1, len(used_cols) or 1),
+                            "low_coverage": (cov < 2),
+                        })
+                        used_cols_log[fname] = used_cols
+                        # Log tuned params per used column
+                        try:
+                            param_log = {}
+                            for col in used_cols:
+                                ty = _series_type_of(col, cfg)
+                                if ty:
+                                    params = default_window_minp_for_type(ty)
+                                else:
+                                    params = pick_window_minp(pd.to_numeric(result_data[col], errors="coerce"))
+                                param_log[col] = (int(params["window"]), int(params["min_periods"]))
+                            if param_log:
+                                logger.info("Tuned window/min_periods for %s: %s", fname, param_log)
+                        except Exception:
+                            logger.debug("Param logging failed for %s", fname, exc_info=True)
+                    # Financial Conditions composite from harmonized inputs
+                    fin_inputs = [c for c in ["NFCI", "VIX", "MOVE", "CorporateBondSpread"] if c in result_data.columns]
+                    if fin_inputs:
+                        fin_cols = {}
+                        # ensure cfg defined
+                        cfg = cfg or (load_yaml_config() or {})
+                        for col in fin_inputs:
+                            ty = _series_type_of(col, cfg)
+                            params = default_window_minp_for_type(ty) if ty else pick_window_minp(result_data[col])
+                            fin_cols[col] = robust_zscore_rolling(pd.to_numeric(result_data[col], errors="coerce"),
+                                                                  window=params["window"], min_periods=params["min_periods"])
+                        FinZ = pd.concat(fin_cols, axis=1)
+                        fin_cov = FinZ.notna().sum(axis=1)
+                        fin_factor = FinZ.mean(axis=1).where(fin_cov >= 2)
+                        result_data["FinConditions_Composite"] = fin_factor.ffill(limit=1)
+                        coverage_diag["FinConditions_Composite"] = pd.DataFrame({
+                            "count": fin_cov,
+                            "ratio": fin_cov.astype(float) / max(1, len(fin_cols)),
+                            "low_coverage": (fin_cov < 2),
+                        })
+                        used_cols_log["FinConditions_Composite"] = list(fin_cols.keys())
+                        # Log window/min for FinConditions
+                        try:
+                            param_log = {}
+                            for col in fin_cols.keys():
+                                ty = _series_type_of(col, cfg)
+                                if ty:
+                                    params = default_window_minp_for_type(ty)
+                                else:
+                                    params = pick_window_minp(pd.to_numeric(result_data[col], errors="coerce"))
+                                param_log[col] = (int(params["window"]), int(params["min_periods"]))
+                            if param_log:
+                                logger.info("Tuned window/min_periods for FinConditions: %s", param_log)
+                        except Exception:
+                            logger.debug("Param logging failed for FinConditions", exc_info=True)
+
+                    # Emit concise logs
+                    for k, cols in used_cols_log.items():
+                        logger.info("Factor %s used inputs: %s", k, cols)
+                    # Warn on early low coverage in first 24 months
+                    for fac, diag in coverage_diag.items():
+                        first_win = diag.iloc[:24]
+                        if not first_win.empty and (first_win["ratio"] < 0.5).any():
+                            logger.warning("Low coverage (<50%%) for %s in early sample", fac)
+                    # Save last 12 months coverage snapshot
+                    try:
+                        snap = {k: v.tail(12).assign(factor=k) for k, v in coverage_diag.items()}
+                        snap_df = pd.concat(snap.values(), axis=0)
+                        out_path = os.path.join("Output", "diagnostics")
+                        os.makedirs(out_path, exist_ok=True)
+                        snap_df.to_csv(os.path.join(out_path, "coverage_snapshot.csv"))
+                        # Save full coverage diagnostics
+                        full = {k: v.assign(factor=k) for k, v in coverage_diag.items()}
+                        full_df = pd.concat(full.values(), axis=0)
+                        full_df.to_csv(os.path.join(out_path, "coverage_full.csv"))
+                    except Exception:
+                        logger.debug("Failed to persist coverage snapshot", exc_info=True)
+                    logger.info("Rebuilt F_* and FinConditions with robust z and coverage diagnostics")
+                except Exception as exc:
+                    logger.warning("Failed to rebuild RT composites: %s", exc)
+            except Exception:
+                logger.debug("RT recomputation block raised", exc_info=True)
         
         # Yield curve dynamics
         if all(col in result_data.columns for col in ['DGS10', 'DGS2']):
@@ -417,17 +813,39 @@ def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
             result_data['RealRate_10Y_Mom'] = result_data['RealRate_10Y'].diff(3)
             logger.info("Created RealRate_10Y_Mom feature")
         
-        # Financial conditions composite
-        fin_cols = ['NFCI', 'VIX', 'MOVE', 'CorporateBondSpread']
-        available_fin_cols = [col for col in fin_cols if col in result_data.columns]
-        if available_fin_cols:
+        # Financial conditions composite with synonyms/fallbacks
+        fin_series: Dict[str, pd.Series] = {}
+        if 'NFCI' in result_data.columns:
+            fin_series['NFCI'] = pd.to_numeric(result_data['NFCI'], errors='coerce')
+        # VIX: prefer 'VIX', else 'VIXCLS'
+        if 'VIX' in result_data.columns:
+            fin_series['VIX'] = pd.to_numeric(result_data['VIX'], errors='coerce')
+        elif 'VIXCLS' in result_data.columns:
+            fin_series['VIX'] = pd.to_numeric(result_data['VIXCLS'], errors='coerce')
+        # MOVE: include if present
+        if 'MOVE' in result_data.columns:
+            fin_series['MOVE'] = pd.to_numeric(result_data['MOVE'], errors='coerce')
+        # Corporate bond spread: use provided, or credit_spread, or (BAA-AAA)
+        if 'CorporateBondSpread' in result_data.columns:
+            fin_series['CorporateBondSpread'] = pd.to_numeric(result_data['CorporateBondSpread'], errors='coerce')
+        elif 'credit_spread' in result_data.columns:
+            fin_series['CorporateBondSpread'] = pd.to_numeric(result_data['credit_spread'], errors='coerce')
+        elif 'BAA' in result_data.columns and 'AAA' in result_data.columns:
             try:
-                # Standardize and average financial stress indicators
-                # - Positive: Tight financial conditions (stress)
-                # - Negative: Easy financial conditions (complacency)
-                fin_data = result_data[available_fin_cols].apply(lambda x: (x - x.mean()) / x.std())
+                fin_series['CorporateBondSpread'] = pd.to_numeric(result_data['BAA'], errors='coerce') - pd.to_numeric(result_data['AAA'], errors='coerce')
+            except Exception:
+                pass
+        if fin_series:
+            try:
+                fin_df = pd.DataFrame(fin_series)
+                def _z(x: pd.Series) -> pd.Series:
+                    denom = x.std()
+                    if denom is None or pd.isna(denom) or denom == 0:
+                        denom = 1.0
+                    return (x - x.mean()) / denom
+                fin_data = fin_df.apply(_z)
                 result_data['FinConditions_Composite'] = fin_data.mean(axis=1)
-                logger.info(f"Created FinConditions_Composite feature using {available_fin_cols}")
+                logger.info(f"Created FinConditions_Composite feature using {list(fin_series.keys())}")
             except Exception as e:
                 logger.warning(f"Error creating FinConditions_Composite: {e}")
         
@@ -451,7 +869,7 @@ def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
                 # M2 growth rate: Year-over-year change in money supply
                 # - High: Expansionary monetary policy
                 # - Low/Negative: Contractionary monetary policy
-                result_data['M2_YoY'] = result_data['M2SL'].pct_change(12) * 100
+                result_data['M2_YoY'] = result_data['M2SL'].pct_change(12, fill_method=None) * 100
                 logger.info("Created M2_YoY feature")
                 
                 # Real M2 growth: Money supply growth adjusted for inflation
@@ -463,7 +881,7 @@ def create_advanced_features(data: pd.DataFrame) -> pd.DataFrame:
             except Exception as e:
                 logger.warning(f"Error creating M2 growth features: {e}")
         
-        logger.info("Successfully created advanced features")
+        logger.info("Successfully created advanced features (%s)", mode)
         return result_data
         
     except Exception as e:
@@ -787,3 +1205,7 @@ def handle_outliers(data, columns=None, method='winsorize', threshold=3.0):
     except Exception as e:
         logger.error(f"Error handling outliers: {e}")
         return data 
+
+
+
+

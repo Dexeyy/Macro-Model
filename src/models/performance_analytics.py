@@ -739,6 +739,48 @@ class PerformanceAnalytics:
         except Exception as e:
             logger.error(f"Error creating performance summary plot: {str(e)}")
             return go.Figure()
+
+    def plot_factor_means_by_regime(
+        self,
+        df: pd.DataFrame,
+        regimes: pd.Series,
+        factors: Optional[List[str]] = None,
+        title: str = "Factor Means by Regime",
+    ) -> go.Figure:
+        """Plot a small bar chart per regime of factor means (using Plotly).
+
+        df should contain factor columns (e.g., F_*), regimes is a label series aligned to df.
+        """
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+        except Exception:
+            return go.Figure()
+
+        if factors is None:
+            factors = [c for c in df.columns if isinstance(c, str) and c.startswith("F_")]
+        if not factors:
+            return go.Figure()
+
+        idx = df.index.intersection(regimes.index)
+        if len(idx) == 0:
+            return go.Figure()
+        X = df.loc[idx, factors]
+        r = regimes.loc[idx]
+
+        groups = list(pd.Series(r).astype(str).unique())
+        cols = min(3, max(1, len(groups)))
+        rows = int(np.ceil(len(groups) / cols))
+        fig = make_subplots(rows=rows, cols=cols, subplot_titles=groups)
+
+        for i, g in enumerate(groups):
+            rr = X[r.astype(str) == g]
+            means = rr.mean(axis=0).values.tolist()
+            row = i // cols + 1
+            col = i % cols + 1
+            fig.add_trace(go.Bar(x=factors, y=means, name=g), row=row, col=col)
+        fig.update_layout(title=title, showlegend=False, height=300 + 200 * rows)
+        return fig
     
     def plot_regime_performance_comparison(self, regime_attribution: Dict) -> go.Figure:
         """

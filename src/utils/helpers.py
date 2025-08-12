@@ -230,3 +230,32 @@ def load_yaml_config(path: str = "config/regimes.yaml") -> Optional[Dict[str, An
     except Exception as exc:
         logger.warning("Failed to load YAML config %s: %s", path, exc)
         return None
+
+
+def get_regimes_config(path: str = "config/regimes.yaml") -> Dict[str, Any]:
+    """Load regimes YAML config and merge with sane defaults.
+
+    Defaults:
+      models: ["rule", "gmm", "hmm"]
+      postprocess: { min_duration: 3, prob_threshold: 0.7, consecutive: 2 }
+      run: { mode: "retro", bundle: "coincident" }
+      pca: { enabled: False }
+    """
+    defaults: Dict[str, Any] = {
+        "models": ["rule", "gmm", "hmm"],
+        "postprocess": {"min_duration": 3, "prob_threshold": 0.7, "consecutive": 2},
+        "run": {"mode": "retro", "bundle": "coincident"},
+        "pca": {"enabled": False},
+    }
+    cfg = load_yaml_config(path) or {}
+    # Merge shallowly with preference to file values
+    out: Dict[str, Any] = defaults.copy()
+    out.update({k: v for k, v in cfg.items() if v is not None})
+    # Deep-merge dict subsections we know about
+    for key in ("postprocess", "run", "pca"):
+        d = defaults.get(key, {})
+        c = cfg.get(key, {}) if isinstance(cfg.get(key), dict) else {}
+        merged = d.copy()
+        merged.update(c)
+        out[key] = merged
+    return out
