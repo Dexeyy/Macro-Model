@@ -9,6 +9,7 @@ A production‑oriented framework for macroeconomic regime detection, probabilit
 - Per‑model probabilities (`*_Prob_*`) + probability‑based ensemble with confirmation and min‑duration stabilizers
 - Validators and diagnostics: duration sanity, local mean/variance tests (Chow‑like), change‑point hints
 - Real‑time (“rt”; publication‑lag‑disciplined) and Retro (“retro”) feature modes
+- Vintage‑aware ALFRED fetching (no look‑ahead): each date uses observations available as‑of that date; publication lags applied before transforms
 - Excel dashboard: regime timeline, stacked probability strip, low‑confidence shading, per‑theme signature charts, KPI confidence
 - Performance analytics with regime separation scorecard (ANOVA) and portfolio helpers
 
@@ -73,6 +74,25 @@ ensemble:
 run:
   mode: retro                   # rt | retro (feature alignment)
   bundle: coincident            # coincident | coincident_plus_leading
+
+publication_lags:              # months; applied prior to transforms/z-scores
+  CPIAUCSL: 1
+  UNRATE: 0
+
+factors:                        # config-driven factor builder
+  F_Growth:
+    bases: [INDPRO, PAYEMS, GDPC1, CUMFNS]
+    min_k: 2
+  F_Inflation:
+    bases: [CPIAUCSL, PCEPI, PPICMM]
+
+series_types:                   # z-score window presets per series
+  VIX: fast                     # fast: (36,18), typical: (60,24), slow: (120,36)
+  NFCI: slow
+
+outliers:
+  method: hampel                # or winsorize
+  zmax: 6
 
 pca:
   enabled: false
@@ -170,7 +190,7 @@ Use `PerformanceAnalytics` to produce:
 
 Fit regimes (respects YAML `run.bundle` and `run.mode` unless overridden):
 
-```
+``` 
 python -m cli regimes fit --mode rt --bundle coincident --models hmm gmm rule --n-regimes 4
 ```
 
@@ -186,6 +206,12 @@ End‑to‑end (equivalent of `main.py`):
 
 ```
 python -m cli run full
+```
+
+Run end‑to‑end with custom dates and outlier/coverage options via `main.py`:
+
+```
+python main.py --start 1990-01-01 --end 2025-06-01 --outlier hampel --coverage_k 2
 ```
 
 ---

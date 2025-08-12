@@ -9,8 +9,9 @@ hmm:
   prob_threshold: 0.7
 models:
 - rule
-- gmm
+- kmeans
 - hmm
+- supervised
 themes:
   credit_risk: []
   external: []
@@ -22,6 +23,16 @@ postprocess:
   min_duration: 3
   prob_threshold: 0.7
   consecutive: 2
+
+# Supervised classifier configuration
+supervised:
+  cv_splits: 4
+  # leave multi_class default (OVR) to avoid sklearn deprecation warnings
+
+# Optional smoothing and minimum duration globally
+smoothing:
+  window: 3
+  min_duration: 2
 run:
   mode: retro
   bundle: coincident

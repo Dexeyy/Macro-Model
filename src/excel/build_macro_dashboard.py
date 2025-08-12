@@ -449,12 +449,29 @@ def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
 
 def main():
     import argparse
+    import os
+    import sys
+    import subprocess
 
     parser = argparse.ArgumentParser(description="Build charts into Macro Reg Template workbook")
     parser.add_argument("--workbook", default="tests/Macro Reg Template.xlsm", help="Path to workbook (.xlsx or .xlsm)")
     parser.add_argument("--out", default=None, help="Optional output path (overwrite in place if omitted)")
+    parser.add_argument("--open", action="store_true", help="Open the workbook after saving")
     args = parser.parse_args()
     build_inplace(args.workbook, out=args.out)
+
+    if args.open:
+        # Determine final path
+        out_path = args.out or "Output/Macro_Reg_Report_with_category_dashboards.xlsm"
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(out_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", out_path])
+            else:
+                subprocess.Popen(["xdg-open", out_path])
+        except Exception:
+            print(f"Open the workbook manually: {out_path}")
 
 
 if __name__ == "__main__":

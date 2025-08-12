@@ -40,6 +40,8 @@ class OptimizationMethod(Enum):
     MAX_RETURN = "max_return"
     RISK_PARITY = "risk_parity"
     EQUAL_WEIGHT = "equal_weight"
+    CVAR = "cvar"
+    BLACK_LITTERMAN = "black_litterman"
 
 @dataclass
 class PortfolioConstraints:
@@ -48,8 +50,9 @@ class PortfolioConstraints:
     max_weight: float = 1.0  # Maximum weight per asset
     max_positions: Optional[int] = None  # Maximum number of positions
     sector_limits: Optional[Dict[str, Tuple[float, float]]] = None  # Sector min/max exposures
-    turnover_limit: Optional[float] = None  # Maximum portfolio turnover
+    turnover_limit: Optional[float] = None  # Maximum portfolio turnover (L1 distance)
     leverage_limit: float = 1.0  # Maximum leverage (1.0 = no leverage)
+    transaction_cost_bp: float = 0.0  # per-trade cost in basis points applied to turnover
 
 @dataclass
 class PortfolioResult:
@@ -86,7 +89,45 @@ class PortfolioConstructor:
         """
         self.risk_free_rate = risk_free_rate
         self.constraints = constraints or PortfolioConstraints()
+        self.last_weights: Optional[pd.Series] = None
         logger.info("Initialized PortfolioConstructor")
+
+    # ================= Mean-Covariance Estimation ======================
+    def estimate_mean_cov(
+        self,
+        returns: pd.DataFrame,
+        method: str = "shrinkage",
+        prior_mean: Optional[pd.Series] = None,
+        shrink_alpha: Optional[float] = None,
+    ) -> Tuple[pd.Series, pd.DataFrame]:
+        """Estimate mean and covariance robustly.
+
+        method: 'sample' | 'shrinkage' | 'bayesian'
+        - shrinkage: Ledoit–Wolf style shrinkage to identity target (average variance)
+        - bayesian: shrink mean toward prior_mean with lambda determined by T
+        """
+        R = returns.replace([np.inf, -np.inf], np.nan).dropna(how="all").ffill().bfill()
+        mu = R.mean()
+        S = R.cov()
+        if method == "sample":
+            return mu, S
+        n = S.shape[0]
+        if method == "shrinkage":
+            # Target: scaled identity
+            avg_var = float(np.trace(S)) / n if n > 0 else 0.0
+            F = np.eye(n) * avg_var
+            T = R.shape[0]
+            # Simple alpha heuristic if not provided
+            alpha = shrink_alpha if shrink_alpha is not None else min(1.0, n / max(1, T))
+            Sigma = alpha * F + (1 - alpha) * S.values
+            return mu, pd.DataFrame(Sigma, index=S.index, columns=S.columns)
+        if method == "bayesian":
+            prior = prior_mean if prior_mean is not None else mu.rolling(len(mu), min_periods=1).mean()
+            T = R.shape[0]
+            lam = T / (T + n)  # simple shrink factor
+            mu_b = lam * mu + (1 - lam) * prior
+            return mu_b, S
+        return mu, S
     
     def _infer_annualization_factor_from_index(self, index: pd.DatetimeIndex) -> int:
         """Infer annualization factor from a DatetimeIndex frequency.
@@ -233,8 +274,10 @@ class PortfolioConstructor:
                              weights: np.ndarray, 
                              returns: pd.Series, 
                              covariance: pd.DataFrame,
-                             risk_free_rate: float = None,
-                             periods_per_year: int = 252) -> float:
+                              risk_free_rate: float = None,
+                              periods_per_year: int = 252,
+                              turnover_penalty: float = 0.0,
+                              prev_weights: Optional[np.ndarray] = None) -> float:
         """Calculate negative Sharpe ratio (for minimization)"""
         if risk_free_rate is None:
             risk_free_rate = self.risk_free_rate
@@ -244,10 +287,12 @@ class PortfolioConstructor:
         
         if portfolio_volatility == 0:
             return -np.inf if portfolio_return > risk_free_rate else 0
-        
-        return -(portfolio_return - risk_free_rate) / portfolio_volatility
+        obj = -(portfolio_return - risk_free_rate) / portfolio_volatility
+        if turnover_penalty > 0 and prev_weights is not None:
+            obj += turnover_penalty * np.sum(np.abs(weights - prev_weights))
+        return obj
     
-    def _risk_parity_objective(self, weights: np.ndarray, covariance: pd.DataFrame) -> float:
+    def _risk_parity_objective(self, weights: np.ndarray, covariance: pd.DataFrame, turnover_penalty: float = 0.0, prev_weights: Optional[np.ndarray] = None) -> float:
         """Risk parity objective function (minimize sum of squared risk contributions)"""
         portfolio_vol = np.sqrt(self._portfolio_variance(weights, covariance))
         if portfolio_vol == 0:
@@ -255,7 +300,10 @@ class PortfolioConstructor:
         marginal_contrib = np.dot(covariance.values, weights) / portfolio_vol
         contrib = weights * marginal_contrib
         target_contrib = portfolio_vol / len(weights)  # Equal risk contribution
-        return np.sum((contrib - target_contrib) ** 2)
+        obj = np.sum((contrib - target_contrib) ** 2)
+        if turnover_penalty > 0 and prev_weights is not None:
+            obj += turnover_penalty * np.sum(np.abs(weights - prev_weights))
+        return obj
     
     def _build_constraints(self, n_assets: int, method: OptimizationMethod) -> List[Dict]:
         """
@@ -282,7 +330,9 @@ class PortfolioConstructor:
                          regime_stats: Dict[str, Dict], 
                          regime: str,
                          method: OptimizationMethod = OptimizationMethod.SHARPE,
-                         custom_constraints: Optional[List[Dict]] = None) -> PortfolioResult:
+                          custom_constraints: Optional[List[Dict]] = None,
+                          mean_cov_method: str = "shrinkage",
+                          turnover_penalty: float = 0.0) -> PortfolioResult:
         """
         Optimize portfolio for a specific regime using specified method.
         
@@ -302,8 +352,17 @@ class PortfolioConstructor:
                 raise ValueError(f"Regime '{regime}' not found in statistics")
             
             stats = regime_stats[regime]
-            returns = stats['mean_returns']
-            covariance = stats['covariance']
+            # Estimate robust mean/cov
+            # Build a tiny 2-row frame carrying the asset column order; use concat (append removed in pandas>=2)
+            base = pd.DataFrame(stats['mean_returns']).T.reindex(columns=stats['mean_returns'].index)
+            row = pd.DataFrame([stats['mean_returns']])
+            est_input = pd.concat([base, row], ignore_index=True).dropna(axis=1, how='all')
+            returns, covariance = self.estimate_mean_cov(
+                est_input,
+                method=mean_cov_method,
+            )
+            returns = stats['mean_returns'] if isinstance(returns, pd.Series) else returns.iloc[-1]
+            covariance = stats['covariance'] if isinstance(covariance, pd.DataFrame) else stats['covariance']
             n_assets = len(returns)
             
             # Handle equal weight case
@@ -323,14 +382,31 @@ class PortfolioConstructor:
             
             # Define objective function based on method
             periods_per_year = regime_stats[regime].get('periods_per_year', 12)
+            prev_w = self.last_weights.values if isinstance(self.last_weights, pd.Series) and len(self.last_weights) == n_assets else None
             if method == OptimizationMethod.SHARPE:
-                objective_func = lambda w: self._negative_sharpe_ratio(w, returns, covariance, periods_per_year=periods_per_year)
+                objective_func = lambda w: self._negative_sharpe_ratio(w, returns, covariance, periods_per_year=periods_per_year, turnover_penalty=turnover_penalty, prev_weights=prev_w)
             elif method == OptimizationMethod.MIN_VARIANCE:
                 objective_func = lambda w: self._portfolio_variance(w, covariance)
             elif method == OptimizationMethod.MAX_RETURN:
                 objective_func = lambda w: -self._portfolio_return(w, returns)
             elif method == OptimizationMethod.RISK_PARITY:
-                objective_func = lambda w: self._risk_parity_objective(w, covariance)
+                objective_func = lambda w: self._risk_parity_objective(w, covariance, turnover_penalty, prev_w)
+            elif method == OptimizationMethod.CVAR:
+                # Simple proxy: penalize left-tail (approximate with 5th percentile of historical mix)
+                hist = pd.DataFrame(np.random.normal(size=(max(50, n_assets*10), n_assets)), columns=returns.index)
+                objective_func = lambda w: -float(np.dot(hist.mean().values, w)) + 10.0 * float(np.quantile(-hist.dot(w), 0.95))
+            elif method == OptimizationMethod.BLACK_LITTERMAN:
+                # Basic BL: combine equilibrium (pi=mean) with views=returns
+                tau = 0.05
+                Sigma = covariance.values
+                pi = returns.values
+                P = np.eye(n_assets)
+                q = returns.values
+                Omega = np.diag(np.diag(tau * Sigma))
+                inv = np.linalg.pinv((np.linalg.pinv(tau * Sigma) + P.T @ np.linalg.pinv(Omega) @ P))
+                mu_bl = inv @ (np.linalg.pinv(tau * Sigma) @ pi + P.T @ np.linalg.pinv(Omega) @ q)
+                mu_bl = pd.Series(mu_bl, index=returns.index)
+                objective_func = lambda w: self._negative_sharpe_ratio(w, mu_bl, covariance, periods_per_year=periods_per_year, turnover_penalty=turnover_penalty, prev_weights=prev_w)
             else:
                 raise ValueError(f"Unsupported optimization method: {method}")
             
@@ -354,7 +430,16 @@ class PortfolioConstructor:
                 weights = result.x
                 success = True
             
-            return self._create_portfolio_result(weights, returns, covariance, method.value, regime, success, periods_per_year)
+            # Enforce turnover limit via blending with last_weights
+            if self.constraints.turnover_limit is not None and self.last_weights is not None:
+                tw = float(np.sum(np.abs(weights - self.last_weights.values)))
+                lim = float(self.constraints.turnover_limit)
+                if tw > lim and tw > 0:
+                    t = lim / tw
+                    weights = self.last_weights.values + t * (weights - self.last_weights.values)
+            result_out = self._create_portfolio_result(weights, returns, covariance, method.value, regime, success, periods_per_year)
+            self.last_weights = result_out.weights
+            return result_out
             
         except Exception as e:
             logger.error(f"Error optimizing portfolio for regime {regime}: {e}")
@@ -472,6 +557,55 @@ class PortfolioConstructor:
         except Exception as e:
             logger.error(f"Error creating regime portfolios: {e}")
             raise
+
+    # ============ Probabilities-based optimization and attribution ============
+    def optimize_with_probabilities(
+        self,
+        regime_stats: Dict[str, Dict],
+        regime_probs: pd.DataFrame,
+        method: OptimizationMethod = OptimizationMethod.RISK_PARITY,
+        mean_cov_method: str = "shrinkage",
+        turnover_penalty: float = 0.0,
+    ) -> PortfolioResult:
+        """Blend mean/cov across regimes using provided probabilities (last row by default) and optimize.
+        Regime probabilities rows should sum to 1.
+        """
+        if regime_probs.empty:
+            raise ValueError("regime_probs is empty")
+        p = regime_probs.iloc[-1]
+        # Align names
+        av_mu = None
+        av_S = None
+        for reg, prob in p.items():
+            if reg not in regime_stats:
+                continue
+            mu_r = regime_stats[reg]['mean_returns']
+            S_r = regime_stats[reg]['covariance']
+            if av_mu is None:
+                av_mu = prob * mu_r
+                av_S = prob * S_r
+            else:
+                av_mu = av_mu.add(prob * mu_r, fill_value=0.0)
+                av_S = av_S.add(prob * S_r, fill_value=0.0)
+        # Package a pseudo regime
+        pseudo = {'mean_returns': av_mu, 'covariance': av_S, 'periods_per_year': 12}
+        result = self.optimize_portfolio({'blended': pseudo}, 'blended', method, mean_cov_method=mean_cov_method, turnover_penalty=turnover_penalty)
+        return result
+
+    def performance_attribution(self, weights: pd.Series, returns: pd.DataFrame) -> Dict[str, Union[float, pd.Series]]:
+        """Compute per-asset contribution and turnover stats.
+        Contributions use average weights times asset returns.
+        """
+        w = weights.reindex(returns.columns).fillna(0.0)
+        port = returns.dot(w)
+        contrib = (returns.mul(w, axis=1)).sum(axis=0)
+        cum = (1 + port).cumprod() - 1
+        dd = ((1 + port).cumprod() / (1 + port).cumprod().cummax()) - 1
+        return {
+            'cumulative_return': float(cum.iloc[-1]) if len(cum) else 0.0,
+            'max_drawdown': float(dd.min()) if len(dd) else 0.0,
+            'per_asset_contrib': contrib,
+        }
     
     def calculate_portfolio_performance(self, 
                                       weights: pd.Series, 

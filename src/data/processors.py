@@ -11,8 +11,115 @@ from src.features.economic_indicators import build_theme_composites
 from src.features.pca_factors import fit_theme_pca
 from src.utils.helpers import load_yaml_config, get_regimes_config
 from src.utils.zscores import robust_zscore_rolling, pick_window_minp, default_window_minp_for_type
-from src.utils.factors import build_factor as public_build_factor
 from typing import Literal
+from src.data.vintage_fetcher import apply_publication_lags as apply_publication_lags_v2
+from src.utils.factors import build_factor as public_build_factor
+############ New robust preparation utilities ############
+
+def _winsorize_series(s: pd.Series, zmax: float) -> pd.Series:
+    s = pd.to_numeric(s, errors="coerce")
+    mu = s.mean()
+    sd = s.std(ddof=0)
+    if sd is None or pd.isna(sd) or sd == 0:
+        return s
+    lo = mu - zmax * sd
+    hi = mu + zmax * sd
+    return s.clip(lower=lo, upper=hi)
+
+
+def _hampel_series(s: pd.Series, window: int, zmax: float) -> pd.Series:
+    s = pd.to_numeric(s, errors="coerce")
+    roll = s.rolling(window=window, min_periods=max(1, int(window * 0.5)))
+    med = roll.median()
+    mad = roll.apply(lambda x: np.median(np.abs(x - np.median(x))), raw=False)
+    denom = 1.4826 * mad.replace(0.0, np.nan)
+    z = (s - med) / denom
+    out = s.copy()
+    mask = z.abs() > float(zmax)
+    out[mask] = med[mask]
+    return out
+
+
+def prepare_missing(
+    df: pd.DataFrame,
+    tcode_map: Dict[str, int] | None = None,
+    *,
+    outlier_method: str = "hampel",
+    zmax: float = 6.0,
+    hampel_window: int = 36,
+) -> pd.DataFrame:
+    """Apply Stock–Watson tcodes, series-mapping, and robust outlier cleaning.
+
+    - Applies differencing/log transforms per tcode_map (if provided)
+    - Harmonizes financial condition series names (VIXCLS->VIX, ^MOVE->MOVE, BAA-AAA)
+    - Drops constant or all-NaN columns
+    - Applies Hampel (median/MAD) or winsorize cleaning after transforms
+    """
+    if df is None or df.empty:
+        return df
+    data = df.copy()
+    if not isinstance(data.index, pd.DatetimeIndex):
+        try:
+            data.index = pd.to_datetime(data.index)
+        except Exception:
+            pass
+    data = data.sort_index()
+
+    # Series mapping first to ensure tcodes apply to final names as needed
+    data = _harmonize_financial_condition_names(data)
+
+    # Apply tcodes if provided
+    if tcode_map:
+        def safe_log(s: pd.Series) -> pd.Series:
+            x = pd.to_numeric(s, errors="coerce")
+            x = x.where(x > 0)
+            return np.log(x)
+        transformed = {}
+        for col, tcode in tcode_map.items():
+            if col not in data.columns:
+                continue
+            s = pd.to_numeric(data[col], errors="coerce")
+            try:
+                if tcode == 1:
+                    transformed[col] = s
+                elif tcode == 2:
+                    transformed[col] = s.diff(1)
+                elif tcode == 4:
+                    transformed[col] = s.diff(4)
+                elif tcode == 5:
+                    transformed[col] = safe_log(s)
+                elif tcode == 6:
+                    transformed[col] = safe_log(s).diff(1)
+                elif tcode == 7:
+                    transformed[col] = safe_log(s).diff(1).diff(1)
+                else:
+                    transformed[col] = s
+            except Exception:
+                transformed[col] = s
+        if transformed:
+            for k, v in transformed.items():
+                data[k] = v
+
+    # Drop constant or entirely NaN columns
+    to_drop = []
+    for c in list(data.columns):
+        s = pd.to_numeric(data[c], errors="coerce")
+        if s.notna().sum() == 0 or s.nunique(dropna=True) <= 1:
+            to_drop.append(c)
+    if to_drop:
+        data = data.drop(columns=to_drop, errors="ignore")
+
+    # Outlier cleaning on remaining numeric columns
+    num_cols = [c for c in data.columns if pd.api.types.is_numeric_dtype(data[c])]
+    if num_cols:
+        if outlier_method.lower() in ("winsorize", "winsor", "clip"):
+            for c in num_cols:
+                data[c] = _winsorize_series(data[c], zmax=float(zmax))
+        else:
+            for c in num_cols:
+                data[c] = _hampel_series(data[c], window=int(hampel_window), zmax=float(zmax))
+
+    return data
 
 # Set up logging
 logging.basicConfig(
@@ -521,7 +628,8 @@ def create_advanced_features(data: pd.DataFrame, mode: str = "retro") -> pd.Data
         rt_mode = isinstance(mode, str) and mode.lower() in ("rt", "real-time", "realtime")
         if rt_mode:
             try:
-                base = apply_publication_lags(base)
+                # Use the new v2 lag alignment which accepts explicit lags if provided via YAML
+                base = apply_publication_lags_v2(base, None)
                 logger.info("Applied publication-lag alignment for real-time feature set")
             except Exception as exc:
                 logger.warning("Lag alignment failed; proceeding without alignment: %s", exc)
@@ -929,22 +1037,35 @@ def merge_macro_and_asset_data(macro_data, asset_returns, regime_col):
         # Ensure both DataFrames have DatetimeIndex
         if not isinstance(macro_data.index, pd.DatetimeIndex):
             macro_data.index = pd.to_datetime(macro_data.index)
-        
         if not isinstance(asset_returns.index, pd.DatetimeIndex):
             asset_returns.index = pd.to_datetime(asset_returns.index)
-        
-        # Perform the merge
-        data_for_analysis = macro_data[[regime_col]].merge(
-            asset_returns,
+
+        # Normalize to month-end timestamps to ensure alignment
+        macro_norm = macro_data.copy()
+        asset_norm = asset_returns.copy()
+        macro_norm.index = macro_norm.index.to_period('M').to_timestamp('M')
+        asset_norm.index = asset_norm.index.to_period('M').to_timestamp('M')
+
+        # Perform the merge on normalized indexes
+        data_for_analysis = macro_norm[[regime_col]].merge(
+            asset_norm,
             left_index=True,
             right_index=True,
-            how="inner"  # 'inner' keeps only dates present in both DataFrames
+            how="inner",
         )
-        
-        # Drop any rows with NaN values
-        data_for_analysis = data_for_analysis.dropna()
-        
-        logger.info(f"Successfully merged macro and asset data with shape: {data_for_analysis.shape}")
+
+        # Drop rows with missing regime label
+        data_for_analysis = data_for_analysis.dropna(subset=[regime_col])
+
+        # Drop rows where all asset returns are missing, but keep rows with partial coverage
+        asset_cols = list(asset_norm.columns)
+        if asset_cols:
+            mask_all_na_assets = data_for_analysis[asset_cols].isna().all(axis=1)
+            data_for_analysis = data_for_analysis.loc[~mask_all_na_assets]
+
+        logger.info(
+            f"Successfully merged macro and asset data with shape: {data_for_analysis.shape}"
+        )
         return data_for_analysis
     
     except Exception as e:

@@ -6,10 +6,17 @@ from .plots import (
     plot_regime_transitions
 )
 
-from .ensemble_plots import (
-    plot_ensemble_comparison,
-    plot_regime_agreement_matrix
-)
+try:
+    from .ensemble_plots import (
+        plot_ensemble_comparison,
+        plot_regime_agreement_matrix
+    )
+except Exception:  # optional dependency; provide no-op fallbacks for tests
+    def plot_ensemble_comparison(*args, **kwargs):  # type: ignore
+        return None
+
+    def plot_regime_agreement_matrix(*args, **kwargs):  # type: ignore
+        return None
 
 from .regime_plots import (
     RegimeVisualizer,

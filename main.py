@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+import argparse
 
 # Import configuration
 import sys
@@ -55,14 +56,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def fetch_and_process_data():
+def fetch_and_process_data(start_override: str | None = None, end_override: str | None = None,
+                           outlier: str | None = None, coverage_k: int | None = None):
     """Fetch and process macro and asset data."""
     logger.info("Starting data fetching and processing...")
     
     # Fetch macro data from FRED
     try:
         logger.info("Fetching macro data from FRED...")
-        macro_data_raw = fetch_fred_series(config.FRED_SERIES, config.START_DATE, config.END_DATE)
+        start_date = start_override or config.START_DATE
+        end_date = end_override or config.END_DATE
+        macro_data_raw = fetch_fred_series(config.FRED_SERIES, start_date, end_date)
         # Apply FRED-MD transformations if available
         from src.data.fetchers import apply_fredmd_tcodes
         macro_data_raw = apply_fredmd_tcodes(macro_data_raw)
@@ -400,10 +404,16 @@ def create_portfolios(analysis_results):
 
 def main():
     """Main function to run the analysis pipeline."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start", type=str, default=None)
+    parser.add_argument("--end", type=str, default=None)
+    parser.add_argument("--outlier", type=str, default=None, help="hampel or winsorize")
+    parser.add_argument("--coverage_k", type=int, default=None, help="minimum K for factor averaging")
+    args, _ = parser.parse_known_args()
     logger.info("Starting macro regime analysis pipeline...")
     
     # Step 1: Fetch and process data
-    macro_data, asset_returns = fetch_and_process_data()
+    macro_data, asset_returns = fetch_and_process_data(args.start, args.end, args.outlier, args.coverage_k)
     
     # Step 2: Classify regimes
     macro_data_with_regimes = classify_regimes(macro_data)
