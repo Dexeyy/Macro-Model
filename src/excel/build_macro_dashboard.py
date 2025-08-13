@@ -15,7 +15,19 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font
+from openpyxl.chart import BarChart, Reference
+try:
+    # Optional: portfolio/dashboard configuration for display
+    from config.config import REGIME_WINDOW_YEARS, REBAL_FREQ, TRANSACTION_COST
+except Exception:  # pragma: no cover
+    REGIME_WINDOW_YEARS, REBAL_FREQ, TRANSACTION_COST = 10, 'M', 0.0005
 
+# Optional heavy dependency; guarded import
+try:
+    from src.models.portfolio import PortfolioConstructor, OptimizationMethod
+except Exception:  # pragma: no cover - optional import for dashboard extras
+    PortfolioConstructor = None  # type: ignore
+    OptimizationMethod = None  # type: ignore
 
 THEME_SHEETS: List[str] = [
     "Growth & Labour",
@@ -49,9 +61,24 @@ def _save_plot(fig, outdir: Path, filename: str) -> Path:
     return out
 
 
-def insert_image(ws: Worksheet, image_path: Path, anchor_cell: str) -> None:
+def insert_image(ws: Worksheet, image_path: Path, anchor_cell: str, *, max_width: int | None = None, max_height: int | None = None) -> None:
+    """Insert an image with optional bounding-box scaling to avoid overlaps.
+
+    Sizes are in pixels; aspect ratio is preserved when any bound is set.
+    """
     try:
         img = XLImage(str(image_path))
+        try:
+            orig_w, orig_h = int(img.width), int(img.height)
+        except Exception:
+            orig_w = orig_h = None
+        if orig_w and orig_h and (max_width or max_height):
+            scale_w = (max_width / orig_w) if max_width else 1.0
+            scale_h = (max_height / orig_h) if max_height else 1.0
+            scale = min(scale_w, scale_h)
+            if scale < 1.0:
+                img.width = int(orig_w * scale)
+                img.height = int(orig_h * scale)
         ws.add_image(img, anchor_cell)
     except Exception:
         pass
@@ -271,52 +298,255 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
     if sheetname not in wb.sheetnames:
         return
     ws: Worksheet = wb[sheetname]
+    # Remove any previously inserted images so new renders don't stack
+    try:
+        for img in list(getattr(ws, "_images", [])):
+            ws._images.remove(img)
+    except Exception:
+        pass
     df = load_theme_df(wb, sheetname)
     if df is None or df.empty:
         return
     p1 = render_plot_trend(sheetname, df, outdir)
     if p1:
-        insert_image(ws, p1, "A2")
+        insert_image(ws, p1, "A2", max_width=620, max_height=280)
     # Signature chart using Data Dump
     monthly = load_data_dump_df(wb)
     if monthly is not None and not monthly.empty:
         p2 = render_theme_signature(sheetname, monthly, outdir)
         if p2:
-            insert_image(ws, p2, "A22")
+            insert_image(ws, p2, "A22", max_width=620, max_height=280)
+
+
+def _build_6040_benchmark(returns: pd.DataFrame) -> pd.Series | None:
+    """Create a simple 60/40 stock/bond benchmark from available return columns.
+
+    Heuristics: prefer 'SPX' for stocks and 'US10Y_NOTE_FUT' for bonds, with
+    several fallbacks. Returns are expected as arithmetic monthly returns.
+    """
+    if returns is None or returns.empty:
+        return None
+    cols = list(returns.columns)
+    def pick(preferences: list[str]) -> str | None:
+        for p in preferences:
+            if p in cols:
+                return p
+        # loose match
+        for c in cols:
+            lc = str(c).lower()
+            if any(k in lc for k in [p.lower() for p in preferences]):
+                return c
+        return None
+    stock_pref = ["SPX", "SP500", "^GSPC", "SPTR", "EQUITY", "STOCK"]
+    bond_pref = ["US10Y_NOTE_FUT", "US30Y_BOND_FUT", "ZN", "ZB", "IEF", "AGG", "BOND"]
+    stock_col = pick(stock_pref)
+    bond_col = pick(bond_pref)
+    if not stock_col or not bond_col:
+        return None
+    s = pd.to_numeric(returns[stock_col], errors="coerce").fillna(0.0)
+    b = pd.to_numeric(returns[bond_col], errors="coerce").fillna(0.0)
+    bench = 0.6 * s + 0.4 * b
+    return bench
 
 
 def build_dashboard(wb, outdir: Path) -> None:
     if "Dashboard" not in wb.sheetnames:
         return
-    series = {}
+
+    def _compute_theme_series_fallback() -> dict:
+        featured_csv = Path("Data/processed/macro_data_featured.csv")
+        if not featured_csv.exists():
+            return {}
+        try:
+            m = pd.read_csv(featured_csv, index_col=0, parse_dates=[0])
+        except Exception:
+            return {}
+        groups = {"Growth & Labour": [], "Inflation & Liquidity": [], "Credit & Risk": [], "Housing": [], "FX & Commodities": []}
+        infl_kw = ("cpi", "infl", "ppi", "m2", "liqu")
+        credit_kw = ("spread", "risk", "nfc", "baml", "move")
+        housing_kw = ("houst", "housing", "case", "mort", "permit")
+        fx_kw = ("fx", "usd", "eur", "oil", "gold", "btc", "commod", "dcoil")
+        for col in m.columns:
+            lc = str(col).lower()
+            if lc.startswith(infl_kw) or any(k in lc for k in infl_kw):
+                groups["Inflation & Liquidity"].append(col)
+            elif any(k in lc for k in credit_kw):
+                groups["Credit & Risk"].append(col)
+            elif any(k in lc for k in housing_kw):
+                groups["Housing"].append(col)
+            elif any(k in lc for k in fx_kw):
+                groups["FX & Commodities"].append(col)
+            else:
+                groups["Growth & Labour"].append(col)
+        out = {}
+        for theme, cols in groups.items():
+            if not cols:
+                continue
+            sub = m[cols].dropna(how="all")
+            if sub.empty:
+                continue
+            z = sub.apply(lambda s: (s - s.mean()) / (s.std(ddof=0) or 1.0))
+            out[theme] = pd.to_numeric(z.mean(axis=1), errors="coerce")
+        return out
+
+    # Correlation heatmap
+    series: Dict[str, pd.Series] = {}
     for theme in THEME_SHEETS:
         df = load_theme_df(wb, theme)
         if df is not None and not df.empty and "ThemeComposite" in df.columns:
             series[theme] = pd.to_numeric(df["ThemeComposite"], errors="coerce")
     if len(series) < 3:
-        return
-    dfc = pd.DataFrame(series).dropna(how="all")
-    if isinstance(dfc.index, pd.DatetimeIndex) and len(dfc) > 0:
-        cutoff = dfc.index.max() - pd.DateOffset(years=5)
-        dfc = dfc[dfc.index >= cutoff]
-    corr = dfc.corr()
+        series = _compute_theme_series_fallback()
+    if len(series) >= 3:
+        dfc = pd.DataFrame(series).dropna(how="all")
+        if isinstance(dfc.index, pd.DatetimeIndex) and len(dfc) > 0:
+            cutoff = dfc.index.max() - pd.DateOffset(years=5)
+            dfc = dfc[dfc.index >= cutoff]
+        if not dfc.empty:
+            try:
+                ws: Worksheet = wb["Dashboard"]
+                for img in list(getattr(ws, "_images", [])):
+                    ws._images.remove(img)
+            except Exception:
+                pass
+            try:
+                corr = dfc.corr()
+                fig, ax = plt.subplots(figsize=(7.4, 4.8))
+                im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
+                ax.set_xticks(range(len(corr.columns)))
+                ax.set_xticklabels(corr.columns, rotation=45, ha="right")
+                ax.set_yticks(range(len(corr.index)))
+                ax.set_yticklabels(corr.index)
+                ax.set_title("Theme Composites — Correlation (5y)")
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                path_corr = _save_plot(fig, outdir, "dashboard_correlation.png")
+                # Revert to heatmap at the top-left
+                insert_image(ws, path_corr, "A2", max_width=650, max_height=360)
+            except Exception:
+                pass
+
+    # KPIs and highlights
     ws: Worksheet = wb["Dashboard"]
     try:
-        for img in list(ws._images):
-            ws._images.remove(img)
+        reg_csv = Path("Data/processed/macro_data_with_regimes.csv")
+        if reg_csv.exists():
+            reg_df = pd.read_csv(reg_csv, index_col=0, parse_dates=[0])
+            if "Regime_Ensemble" in reg_df.columns and len(reg_df) > 0:
+                current_reg = str(reg_df["Regime_Ensemble"].iloc[-1])
+                rev = reg_df["Regime_Ensemble"][::-1]
+                months = int((rev == current_reg).astype(int).cumsum().iloc[0])
+                ws["J2"].value = "Current Regime:"
+                ws["K2"].value = current_reg
+                ws["J3"].value = "Months in Regime:"
+                ws["K3"].value = months
+                try:
+                    ws["J2"].font = Font(bold=True)
+                    ws["J3"].font = Font(bold=True)
+                except Exception:
+                    pass
+                feat_csv = Path("Data/processed/macro_data_featured.csv")
+                if feat_csv.exists():
+                    m = pd.read_csv(feat_csv, index_col=0, parse_dates=[0])
+                    if len(m) > 24:
+                        horizon = m.index.max() - pd.DateOffset(years=10)
+                        base = m[m.index >= horizon] if isinstance(m.index, pd.DatetimeIndex) else m
+                        z = base.apply(lambda s: (s - s.mean()) / (s.std(ddof=0) or 1.0))
+                        top = z.iloc[-1].abs().sort_values(ascending=False).head(8)
+                        ws["J5"].value = "Top Regime Features (|z|)"
+                        try:
+                            ws["J5"].font = Font(bold=True)
+                        except Exception:
+                            pass
+                        r0 = 6
+                        for i, (name, val) in enumerate(top.items()):
+                            ws.cell(row=r0 + i, column=10).value = str(name)
+                            ws.cell(row=r0 + i, column=11).value = float(val)
+
+                # Model/optimizer summary box
+                try:
+                    ws["A6"].value = "Models in Report"
+                    ws["A6"].font = Font(bold=True)
+                    cols = set(reg_df.columns)
+                    models = []
+                    for key in ("Rule", "KMeans", "GMM", "HMM", "Supervised"):
+                        if any(c for c in cols if str(c).lower().startswith(key.lower())):
+                            models.append(key)
+                    # Ensemble probabilities
+                    prob_cols = [c for c in cols if isinstance(c, str) and c.startswith("Ensemble_Prob_")]
+                    if prob_cols:
+                        models.append(f"Ensemble({len(prob_cols)} probs)")
+                    ws["A7"].value = ", ".join(models) if models else "n/a"
+
+                    # Portfolio optimizer/config
+                    ws["A9"].value = "Portfolio Method"
+                    ws["A9"].font = Font(bold=True)
+                    ws["B9"].value = "Sharpe (dynamic regime)"
+                    ws["A10"].value = "Rebalance"
+                    ws["B10"].value = str(REBAL_FREQ)
+                    ws["A11"].value = "Lookback (yrs)"
+                    ws["B11"].value = int(REGIME_WINDOW_YEARS)
+                    ws["A12"].value = "Tx cost"
+                    ws["B12"].value = float(TRANSACTION_COST)
+                except Exception:
+                    pass
     except Exception:
         pass
+
+    # Optimal allocation and YTD chart
     try:
-        fig, ax = plt.subplots(figsize=(7.4, 4.8))
-        im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
-        ax.set_xticks(range(len(corr.columns)))
-        ax.set_xticklabels(corr.columns, rotation=45, ha="right")
-        ax.set_yticks(range(len(corr.index)))
-        ax.set_yticklabels(corr.index)
-        ax.set_title("Theme Composites — Correlation (5y)")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        path_corr = _save_plot(fig, outdir, "dashboard_correlation.png")
-        insert_image(ws, path_corr, "A2")
+        reg_csv = Path("Data/processed/macro_data_with_regimes.csv")
+        asset_csv = Path("Data/processed/asset_returns.csv")
+        if PortfolioConstructor and reg_csv.exists() and asset_csv.exists():
+            reg_df = pd.read_csv(reg_csv, index_col=0, parse_dates=[0])
+            assets = pd.read_csv(asset_csv, index_col=0, parse_dates=[0])
+            if "Regime_Ensemble" in reg_df.columns and not assets.empty:
+                current_reg = str(reg_df["Regime_Ensemble"].iloc[-1])
+                df_merged = assets.join(reg_df[["Regime_Ensemble"]], how="inner")
+                df_reg = df_merged[df_merged["Regime_Ensemble"].astype(str) == current_reg].drop(columns=["Regime_Ensemble"]).dropna(how="all")
+                if len(df_reg) >= 12 and df_reg.shape[1] >= 3:
+                    mean_ret = pd.to_numeric(df_reg.mean(), errors="coerce")
+                    cov = df_reg.cov()
+                    regime_stats = {current_reg: {"mean_returns": mean_ret, "covariance": cov, "periods_per_year": 12}}
+                    pc = PortfolioConstructor()
+                    res = pc.optimize_portfolio(regime_stats, current_reg, method=OptimizationMethod.SHARPE)
+                    weights = res.weights.sort_values(ascending=False)
+                    ws["J15"].value = "Optimal Weights (current regime)"
+                    try:
+                        ws["J15"].font = Font(bold=True)
+                    except Exception:
+                        pass
+                    for i, (name, val) in enumerate(weights.items(), start=16):
+                        ws.cell(row=i, column=10).value = str(name)
+                        ws.cell(row=i, column=11).value = float(val)
+                    # Add bar chart for allocation
+                    try:
+                        data = Reference(ws, min_col=11, min_row=16, max_row=16 + len(weights) - 1)
+                        cats = Reference(ws, min_col=10, min_row=16, max_row=16 + len(weights) - 1)
+                        bch = BarChart()
+                        bch.title = "Allocation Weights"
+                        bch.add_data(data, titles_from_data=False)
+                        bch.set_categories(cats)
+                        ws.add_chart(bch, "L15")
+                    except Exception:
+                        pass
+                    this_year = df_merged.index.max().year
+                    ar = assets[assets.index.year == this_year].dropna(how="all")
+                    if not ar.empty:
+                        w = weights.reindex(ar.columns).fillna(0.0)
+                        rp = (ar.fillna(0.0).dot(w)).add(1).cumprod() - 1
+                        bench = _build_6040_benchmark(ar)
+                        if bench is None:
+                            bench = ar.fillna(0.0).mean(axis=1)
+                        ew = bench.add(1).cumprod() - 1
+                        fig, ax = plt.subplots(figsize=(7.4, 3.8))
+                        rp.plot(ax=ax, label="Regime Portfolio", color="#1f77b4")
+                        ew.plot(ax=ax, label="60/40 Benchmark", color="#888888")
+                        ax.set_title("YTD Portfolio PnL")
+                        ax.set_ylabel("Cumulative Return")
+                        ax.grid(True, alpha=0.25)
+                        ax.legend(loc="best")
+                        p = _save_plot(fig, outdir, "dashboard_mmi.png")
+                        insert_image(ws, p, "A22")
     except Exception:
         pass
 
@@ -329,9 +559,13 @@ def build_regime_labels(wb, outdir: Path) -> None:
                 return None
             codes = pd.Categorical(df[regime_col]).codes
             fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(7.4, 4.6), sharex=True, gridspec_kw={"height_ratios": [2.0, 1.0]})
-            ax1.plot(df.index, codes, drawstyle="steps-post")
+            ax1.plot(df.index, codes, drawstyle="steps-post", linewidth=1.6, color="#cc3366")
             ax1.set_title("Global Macro Regime (history)")
             ax1.set_yticks([])
+            try:
+                ax1.set_ylim(-0.5, float(np.nanmax(codes)) + 0.5)
+            except Exception:
+                pass
             ax1.grid(True, axis="x", alpha=0.25)
             prob_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Ensemble_Prob_")]
             if prob_cols:
@@ -377,38 +611,63 @@ def build_regime_labels(wb, outdir: Path) -> None:
         except Exception:
             return None
 
-    ws: Worksheet
-    if "Regime Labels" in wb.sheetnames:
-        ws = wb["Regime Labels"]
-        data = []
-        for row in ws.iter_rows(values_only=True):
-            data.append(list(row))
-        if data:
-            header = data[0]
-            df = pd.DataFrame(data[1:], columns=header)
-            try:
-                df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
-                df = df.set_index(df.columns[0])
-            except Exception:
-                pass
-            path = _render(df)
-            if path:
-                insert_image(ws, path, "A2")
-                return
+    # Prefer the authoritative processed CSV for regime series to avoid
+    # accidental contamination from any existing sheet contents. Fallback to
+    # reading the sheet only if the CSV is missing.
+    df_source: Optional[pd.DataFrame] = None
+    csv_path = Path("Data/processed/macro_data_with_regimes.csv")
+    if csv_path.exists():
+        try:
+            df_source = pd.read_csv(csv_path, index_col=0, parse_dates=[0])
+        except Exception:
+            df_source = None
 
-    try:
-        csv_path = Path("Data/processed/macro_data_with_regimes.csv")
-        if csv_path.exists():
-            df = pd.read_csv(csv_path, index_col=0, parse_dates=[0])
-            path = _render(df)
-            if path is None:
-                return
-            if "Regime Labels" not in wb.sheetnames:
-                wb.create_sheet("Regime Labels")
-            ws = wb["Regime Labels"]
-            insert_image(ws, path, "A2")
-    except Exception:
+    if df_source is None and "Regime Labels" in wb.sheetnames:
+        # Fallback: attempt to reconstruct a DataFrame from current sheet
+        try:
+            ws_tmp: Worksheet = wb["Regime Labels"]
+            data = [list(row) for row in ws_tmp.iter_rows(values_only=True)]
+            if data:
+                header = data[0]
+                df_candidate = pd.DataFrame(data[1:], columns=header)
+                try:
+                    df_candidate.iloc[:, 0] = pd.to_datetime(df_candidate.iloc[:, 0])
+                    df_candidate = df_candidate.set_index(df_candidate.columns[0])
+                except Exception:
+                    pass
+                df_source = df_candidate
+        except Exception:
+            df_source = None
+
+    if df_source is None or df_source.empty:
         return
+
+    path = _render(df_source)
+    if path is None:
+        return
+
+    # Replace the sheet entirely to ensure no tables/listobjects remain
+    try:
+        if "Regime Labels" in wb.sheetnames:
+            ws_old = wb["Regime Labels"]
+            wb.remove(ws_old)
+        wb.create_sheet("Regime Labels")
+    except Exception:
+        # Fallback to clearing if remove fails
+        if "Regime Labels" not in wb.sheetnames:
+            wb.create_sheet("Regime Labels")
+        ws_tmp2: Worksheet = wb["Regime Labels"]
+        try:
+            for img in list(getattr(ws_tmp2, "_images", [])):
+                ws_tmp2._images.remove(img)
+            max_rows = ws_tmp2.max_row or 1
+            if max_rows > 0:
+                ws_tmp2.delete_rows(1, max_rows)
+        except Exception:
+            pass
+    ws: Worksheet = wb["Regime Labels"]
+
+    insert_image(ws, path, "A2", max_width=650, max_height=360)
 
 
 def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
@@ -434,10 +693,16 @@ def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
                     ws._images.remove(img)
             except Exception:
                 pass
-            anchors = ["A2", "A30", "A58", "A86", "A114", "A142"]
-            for anchor, shot in zip(anchors, shots):
+            # Arrange charts in a 2-column grid with consistent scaling
+            grid_cols = ["A", "J"]
+            base_row = 2
+            row_step = 28
+            for i, shot in enumerate(shots):
+                col = grid_cols[i % len(grid_cols)]
+                row = base_row + (i // len(grid_cols)) * row_step
+                anchor = f"{col}{row}"
                 try:
-                    insert_image(ws, Path(shot), anchor)
+                    insert_image(ws, Path(shot), anchor, max_width=440, max_height=260)
                 except Exception:
                     continue
     except Exception:

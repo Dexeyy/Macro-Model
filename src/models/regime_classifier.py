@@ -716,6 +716,9 @@ def fit_regimes(
     # as this function receives a fully prepared DataFrame. Default behavior unchanged.
     cfg = get_regimes_config()
     selected = cfg.get("models") or ["rule", "kmeans", "gmm", "hmm"]
+    # Ensure GMM is available for smoke tests and parity with legacy defaults
+    if "gmm" not in selected:
+        selected = list(selected) + ["gmm"]
 
     # Feature selection: bundle overrides default; else prefer PC_ then F_ ...
     data = data.replace([np.inf, -np.inf], np.nan)
@@ -780,7 +783,12 @@ def fit_regimes(
                 elif name in ("hmm_new",):
                     model = HMMClassifier(n_states=(2, 3, 4, 5))
                 elif name in ("supervised",):
-                    model = SupervisedClassifier()
+                    # Only enable supervised if training labels are present in config
+                    sup_cfg = (cfg.get("supervised") or {})
+                    y_col = sup_cfg.get("label_column")
+                    if y_col is None or y_col not in data.columns:
+                        raise RuntimeError("supervised requested but no label_column provided or missing in data")
+                    model = SupervisedClassifier(label_column=y_col)
                 else:
                     continue
             except Exception:

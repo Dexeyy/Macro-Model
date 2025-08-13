@@ -219,7 +219,7 @@ TCODE_MAP = {
 ASSET_TICKERS = {
     'SPX': '^GSPC',         # S&P 500 Index (index)
     'NDX': '^NDX',          # Nasdaq-100 Index (index)
-    'GOLD': 'XAUUSD=X',     # Gold spot in USD (FX-style spot)
+    'GOLD': 'GC=F',         # COMEX Gold Futures (Yahoo Finance)
     'US30Y_BOND_FUT': 'ZB=F', # 30Y Treasury Bond Futures (price)
     'US10Y_NOTE_FUT': 'ZN=F', # 10Y Treasury Note Futures (price)
     'US5Y_NOTE_FUT': 'ZF=F',  # 5Y Treasury Note Futures (price)
@@ -320,3 +320,105 @@ OUTPUT_DIR = 'Output'
 # Ensure directories exist
 for directory in [RAW_DATA_DIR, PROCESSED_DATA_DIR, OUTPUT_DIR]:
     os.makedirs(directory, exist_ok=True) 
+
+# ---------------------------------------------------------------------------
+# Factor construction configuration
+# ---------------------------------------------------------------------------
+
+# Orientation of series: +1 means “higher is better” for growth/risk-on,
+# -1 means “higher is worse”. Any series not listed here implicitly uses +1.
+# Note: Keys should refer to the base series code (before transform suffixes
+# like _YoY, _MoM, etc.).
+SERIES_SIGN = {
+    # Labour market (bad when higher)
+    "UNRATE": -1,
+    "UEMPMEAN": -1,
+    "UEMPLT5": -1,
+    "UEMP5TO14": -1,
+    "UEMP15OV": -1,
+    "UEMP15T26": -1,
+    "UEMP27OV": -1,
+    "ICSA": -1,
+
+    # Risk/volatility (bad when higher)
+    "VIXCLS": -1,
+    "MOVE": -1,
+
+    # Interest rates and spreads (higher yields/tightening as risk-off)
+    "FEDFUNDS": -1,
+    "TB3MS": -1,
+    "TB6MS": -1,
+    "GS1": -1,
+    "GS5": -1,
+    "GS10": -1,
+    "AAA": -1,
+    "BAA": -1,
+    "TB3SMFFM": -1,
+    "TB6SMFFM": -1,
+    "T1YFFM": -1,
+    "T5YFFM": -1,
+    "T10YFFM": -1,
+    "AAAFFM": -1,
+    "BAAFFM": -1,
+    "COMPAPFF": -1,
+
+    # Dollar (strong USD often a headwind globally)
+    "TWEXAFEGSMTH": -1,
+}
+
+# Sub-buckets within each theme to avoid overweighting very dense categories.
+# Provide representative lists; projects can extend these over time.
+SUB_BUCKETS = {
+    "Growth": {
+        "activity": [
+            "INDPRO", "IPFINAL", "IPCONGD", "IPBUSEQ", "CMRMTSPL", "RSAFS", "RPI", "W875RX1",
+        ],
+        "labour": [
+            "PAYEMS", "CE16OV", "USGOOD", "MANEMP", "AWHMAN", "AWOTMAN",
+            "UNRATE", "UEMPMEAN", "ICSA",
+        ],
+        "sentiment": ["UMCSENT"],
+        "orders": ["ACOGNO", "AMDMNO", "ANDENO", "AMDMUO"],
+    },
+    "Inflation": {
+        "prices": [
+            "CPIAUCSL", "CPIAPPSL", "CPITRNSL", "CPIMEDSL", "CUSR0000SAC", "CUSR0000SAD",
+            "CUSR0000SAS", "PCEPI", "PPICMM", "WPSFD49207", "WPSFD49502",
+        ],
+        "money": ["M1SL", "M2SL", "M2REAL", "BOGMBASE", "TOTRESNS", "NONBORRES"],
+    },
+    "Risk": {
+        "spreads": ["AAA", "BAA", "COMPAPFF", "AAAFFM", "BAAFFM"],
+        "rates": ["FEDFUNDS", "TB3MS", "TB6MS", "GS1", "GS5", "GS10", "TB3SMFFM", "T1YFFM", "T5YFFM", "T10YFFM"],
+        "equities": ["SP500", "CAPE", "SPDIVOR"],
+        "vol_liquidity": ["VIXCLS", "MOVE", "NFCI"],
+    },
+    "Housing": {
+        "construction": ["HOUST", "HOUSTNE", "HOUSTMW", "HOUSTS", "HOUSTW"],
+        "permits": ["PERMIT", "PERMITNE", "PERMITMW", "PERMITS", "PERMITW"],
+    },
+    "FX": {
+        "usd": ["TWEXAFEGSMTH"],
+        "commodities": ["DCOILWTICO"],
+    },
+}
+
+# Correlation pruning threshold and minimum per-sub-bucket coverage
+PRUNE_CORR_THRESHOLD = 0.95
+MIN_SUB_BUCKET_COVERAGE = 2
+
+# ---------------------------------------------------------------------------
+# Dynamic regime portfolio settings
+# ---------------------------------------------------------------------------
+
+# Lookback window (years) for estimating regime mean/cov
+REGIME_WINDOW_YEARS = 15
+
+# Rebalance frequency: 'M' for monthly, 'Q' for quarterly
+REBAL_FREQ = 'Q'
+
+# Per-trade transaction cost (as return, e.g., 0.0005 = 5 bps)
+TRANSACTION_COST = 0.0
+
+# If True and regime probabilities exist, blend estimates via probabilities
+PROBABILITY_BLENDING = True

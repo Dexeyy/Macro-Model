@@ -325,23 +325,29 @@ def create_portfolios(analysis_results):
             # Extract asset returns
             asset_returns = data_for_analysis.drop(columns=[regime_col])
             
-            # Create an equal-weight portfolio for comparison
-            logger.info(f"Creating equal-weight portfolio for {regime_col}...")
-            equal_weight_returns = create_equal_weight_portfolio(asset_returns)
+            # Create a 60/40 stock/bond benchmark for comparison
+            logger.info(f"Creating 60/40 benchmark for {regime_col}...")
+            from src.models.portfolio import create_sixty_forty_benchmark
+            equal_weight_returns = create_sixty_forty_benchmark(asset_returns)
             
             equal_weight_metrics = calculate_portfolio_metrics(equal_weight_returns)
             
             # Create a regime-based portfolio
             logger.info(f"Creating regime-based portfolio for {regime_col}...")
-            regime_portfolio = create_regime_based_portfolio(
+            # NEW: dynamic regime-aware returns using compute_dynamic_regime_portfolio
+            from src.models.portfolio import compute_dynamic_regime_portfolio, OptimizationMethod
+            from config import config as cfg
+            dyn_ret, _ = compute_dynamic_regime_portfolio(
                 asset_returns,
-                data_for_analysis[[regime_col]],
-                regime_performance
+                data_for_analysis[regime_col],
+                regime_window_years=cfg.REGIME_WINDOW_YEARS,
+                method=OptimizationMethod.SHARPE,
+                rebal_freq=cfg.REBAL_FREQ,
+                transaction_cost=cfg.TRANSACTION_COST,
+                probability_blending=cfg.PROBABILITY_BLENDING,
             )
-            
-            regime_portfolio_metrics = calculate_portfolio_metrics(
-                regime_portfolio['portfolio_return']
-            )
+            regime_portfolio = pd.DataFrame({'portfolio_return': dyn_ret})
+            regime_portfolio_metrics = calculate_portfolio_metrics(dyn_ret)
             
             # Save results
             portfolio_results[regime_col] = {
@@ -357,10 +363,7 @@ def create_portfolios(analysis_results):
             
             # Save portfolio returns
             save_data(
-                pd.DataFrame({
-                    'equal_weight': equal_weight_returns,
-                    'regime_based': regime_portfolio['portfolio_return']
-                }),
+                pd.DataFrame({'equal_weight': equal_weight_returns, 'regime_based': regime_portfolio['portfolio_return']}),
                 os.path.join(config.PROCESSED_DATA_DIR, f'portfolio_returns_{regime_col}.csv')
             )
             

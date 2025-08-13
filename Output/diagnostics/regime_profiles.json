@@ -1,0 +1,21 @@
+{
+  "Regime_2": {
+    "factor_mean": {
+      "F_Growth": 0.010722104860573393,
+      "F_Inflation": -0.018608924193039996,
+      "F_Liquidity": -0.049491638323765644
+    },
+    "factor_std": {
+      "F_Growth": 0.7255085025178497,
+      "F_Inflation": 0.5951543492564958,
+      "F_Liquidity": 1.0196927884429878
+    },
+    "count": 60
+  },
+  "_meta": {
+    "mean": 60.0,
+    "median": 60.0,
+    "too_short_share": 0.0,
+    "transitions": {}
+  }
+}

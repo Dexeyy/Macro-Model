@@ -39,6 +39,8 @@ def robust_zscore_rolling(s: pd.Series, window: int, min_periods: int) -> pd.Ser
 
     out = z_mad.copy()
     out[mad_bad] = z_std[mad_bad]
+    # If std and MAD both degenerate, return NaN for those periods
+    out[~np.isfinite(out)] = np.nan
     return out
 
 

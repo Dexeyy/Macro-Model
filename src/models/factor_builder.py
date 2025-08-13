@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Iterable
 
 import pandas as pd
 
 from src.utils.helpers import load_yaml_config
+from config.config import SERIES_SIGN, SUB_BUCKETS, PRUNE_CORR_THRESHOLD, MIN_SUB_BUCKET_COVERAGE
 from src.utils.zscores import robust_zscore_rolling, default_window_minp_for_type, pick_window_minp
 
 
@@ -40,7 +41,88 @@ def _resolve_transform(df: pd.DataFrame, base: str, mode: str) -> str | None:
     return None
 
 
-def build_factor(df: pd.DataFrame, spec: FactorSpec, mode: str = "RETRO") -> Tuple[pd.Series, List[str], pd.Series]:
+def _apply_sign(series: pd.Series, name: str, series_sign: Dict[str, int] | None = None) -> pd.Series:
+    """Multiply a series by its configured sign. Falls back to +1.
+
+    The sign key is matched on the base series name (without transform suffixes).
+    """
+    if series_sign is None:
+        series_sign = SERIES_SIGN or {}
+    # infer base name by splitting at first underscore if present
+    base = str(name).split("_")[0]
+    sign = int(series_sign.get(base, 1))
+    try:
+        return pd.to_numeric(series, errors="coerce") * sign
+    except Exception:
+        return pd.to_numeric(series, errors="coerce")
+
+
+def _signal_strength(z: pd.Series) -> float:
+    # coverage ratio times std deviation
+    cov = float(z.notna().mean())
+    sd = float(pd.to_numeric(z, errors="coerce").dropna().std(ddof=0) or 0.0)
+    return cov * sd
+
+
+def _prune_correlated(cols: List[str], Z: pd.DataFrame, threshold: float) -> List[str]:
+    if not cols:
+        return []
+    # rank by signal strength
+    ranks = sorted(cols, key=lambda c: _signal_strength(Z[c]), reverse=True)
+    kept: List[str] = []
+    for c in ranks:
+        if not kept:
+            kept.append(c)
+            continue
+        corr_ok = True
+        for k in kept:
+            try:
+                cc = float(Z[[c, k]].dropna().corr().iloc[0, 1])
+            except Exception:
+                cc = 0.0
+            if abs(cc) >= threshold:
+                corr_ok = False
+                break
+        if corr_ok:
+            kept.append(c)
+    return kept
+
+
+def _group_by_subbucket(cols: Iterable[str], sub_buckets: Dict[str, Dict[str, List[str]]], theme_hint: str | None = None) -> Dict[str, List[str]]:
+    """Map columns to sub-buckets using configured lists.
+
+    If theme_hint provided, use that node of SUB_BUCKETS; else attempt to find
+    matching sub-buckets across themes.
+    """
+    mapping: Dict[str, List[str]] = {}
+    buckets = {}
+    if theme_hint and theme_hint in sub_buckets:
+        buckets = sub_buckets[theme_hint]
+    else:
+        # merge all for loose matching
+        for v in sub_buckets.values():
+            buckets.update(v)
+    inv: Dict[str, str] = {}
+    for sb, bases in buckets.items():
+        for b in bases:
+            inv[b] = sb
+    for c in cols:
+        base = str(c).split("_")[0]
+        sb = inv.get(base, "misc")
+        mapping.setdefault(sb, []).append(c)
+    return mapping
+
+
+def build_factor(
+    df: pd.DataFrame,
+    spec: FactorSpec,
+    mode: str = "RETRO",
+    *,
+    prune_threshold: float | None = None,
+    series_sign_override: Dict[str, int] | None = None,
+    sub_buckets_override: Dict[str, Dict[str, List[str]]] | None = None,
+    min_sub_bucket_coverage: int | None = None,
+) -> Tuple[pd.Series, List[str], pd.Series]:
     """Build a factor as average of robust z-scores over resolved base transforms.
 
     Applies per-series rolling windows (median/MAD fallback to mean/std) and masks
@@ -55,9 +137,10 @@ def build_factor(df: pd.DataFrame, spec: FactorSpec, mode: str = "RETRO") -> Tup
     if not chosen:
         return pd.Series(index=df.index, dtype=float), [], pd.Series(0, index=df.index, dtype="Int64")
 
+    # Apply sign before z-scoring and compute rolling robust z-scores
     z_cols: Dict[str, pd.Series] = {}
     for col in chosen:
-        s = pd.to_numeric(df[col], errors="coerce")
+        s = _apply_sign(df[col], col, series_sign_override or SERIES_SIGN)
         if s.nunique(dropna=True) <= 1:
             continue
         t = _series_type_of(col, cfg)
@@ -67,9 +150,34 @@ def build_factor(df: pd.DataFrame, spec: FactorSpec, mode: str = "RETRO") -> Tup
         return pd.Series(index=df.index, dtype=float), [], pd.Series(0, index=df.index, dtype="Int64")
 
     Z = pd.concat(z_cols, axis=1)
-    coverage = Z.notna().sum(axis=1)
-    factor = Z.mean(axis=1).where(coverage >= int(spec.min_k))
-    return factor.astype(float), list(z_cols.keys()), coverage.astype("Int64")
+
+    # 1) Correlation pruning
+    thresh = float(prune_threshold if prune_threshold is not None else PRUNE_CORR_THRESHOLD)
+    kept_cols = _prune_correlated(list(Z.columns), Z, thresh)
+    Z = Z[kept_cols]
+
+    # 2) Sub-bucket weighting
+    groups = _group_by_subbucket(kept_cols, sub_buckets_override or SUB_BUCKETS)
+    sub_means = {}
+    min_cov = int(min_sub_bucket_coverage if min_sub_bucket_coverage is not None else MIN_SUB_BUCKET_COVERAGE)
+    for sb, cols_sb in groups.items():
+        block = Z[cols_sb]
+        cov = block.notna().sum(axis=1)
+        sub_means[sb] = block.mean(axis=1).where(cov >= min_cov)
+    if not sub_means:
+        coverage = Z.notna().sum(axis=1)
+        factor = Z.mean(axis=1).where(coverage >= int(spec.min_k))
+        return factor.astype(float), kept_cols, coverage.astype("Int64")
+    SB = pd.DataFrame(sub_means)
+    sb_cov = SB.notna().sum(axis=1)
+    factor = SB.mean(axis=1).where(sb_cov >= int(spec.min_k))
+    # coverage counts reflect contributing series after masking
+    coverage = pd.Series(0, index=df.index, dtype="Int64")
+    for sb, cols_sb in groups.items():
+        block = Z[cols_sb]
+        coverage = coverage.add(block.notna().sum(axis=1).astype("Int64"), fill_value=0)
+    coverage = coverage.astype("Int64")
+    return factor.astype(float), kept_cols, coverage
 
 
 def build_from_config(df: pd.DataFrame, mode: str = "RETRO") -> Tuple[pd.DataFrame, pd.DataFrame]:
