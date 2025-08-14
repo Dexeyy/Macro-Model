@@ -345,6 +345,14 @@ def create_portfolios(analysis_results):
                 rebal_freq=cfg.REBAL_FREQ,
                 transaction_cost=cfg.TRANSACTION_COST,
                 probability_blending=cfg.PROBABILITY_BLENDING,
+                blend_probs=getattr(cfg, 'BLEND_PROBS', cfg.PROBABILITY_BLENDING),
+                min_obs=getattr(cfg, 'MIN_OBS', 36),
+                mean_cov_method=getattr(cfg, 'MEAN_COV_METHOD', 'shrinkage'),
+                risk_free_rate=getattr(cfg, 'RISK_FREE_RATE', 0.02),
+                include_cash=getattr(cfg, 'INCLUDE_CASH', True),
+                cash_name=getattr(cfg, 'CASH_NAME', 'CASH'),
+                blend_alpha=getattr(cfg, 'BLEND_ALPHA', 0.5),
+                auto_minvar_if_all_negative=getattr(cfg, 'AUTO_MINVAR_IF_ALL_NEGATIVE', True),
             )
             regime_portfolio = pd.DataFrame({'portfolio_return': dyn_ret})
             regime_portfolio_metrics = calculate_portfolio_metrics(dyn_ret)

@@ -23,3 +23,13 @@ node_modules/
 
 # OS specific
 .DS_Store
+# Local artifacts
+Data/processed/**
+Data/raw/**
+Output/**
+**/__pycache__/**
+*.parquet
+*.png
+*.xlsm
+~$*.xlsm
+

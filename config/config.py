@@ -417,8 +417,26 @@ REGIME_WINDOW_YEARS = 15
 # Rebalance frequency: 'M' for monthly, 'Q' for quarterly
 REBAL_FREQ = 'Q'
 
-# Per-trade transaction cost (as return, e.g., 0.0005 = 5 bps)
+# Per-trade transaction cost (as return, e.g., 0.0005 = 5 bps). Default 0 by design
 TRANSACTION_COST = 0.0
 
 # If True and regime probabilities exist, blend estimates via probabilities
 PROBABILITY_BLENDING = True
+
+# Minimum observations required for regime-specific estimation before blending
+MIN_OBS = 36
+
+# Mean/covariance estimation method: 'sample' | 'shrinkage' | 'bayesian'
+MEAN_COV_METHOD = 'shrinkage'
+
+# Risk-free rate (annualized) used for Sharpe and tangency calculations
+RISK_FREE_RATE = 0.02
+
+# If True, use per-date regime probability of the active regime to blend with unconditional
+BLEND_PROBS = True
+
+# CASH handling
+INCLUDE_CASH = True
+CASH_NAME = 'CASH'
+BLEND_ALPHA = 0.5
+AUTO_MINVAR_IF_ALL_NEGATIVE = True

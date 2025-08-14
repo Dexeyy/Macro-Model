@@ -92,7 +92,18 @@ app.add_typer(run_app, name="run")
 
 @run_app.command("full")
 def run_full(
-    mode: Optional[str] = typer.Option(None, "--mode", help="Feature mode: 'rt' (real-time) or 'retro' (revised)")
+    mode: Optional[str] = typer.Option(None, "--mode", help="Feature mode: 'rt' (real-time) or 'retro' (revised)"),
+    rebal_freq: Optional[str] = typer.Option(None, "--rebal-freq", help="Rebalance frequency: M or Q"),
+    regime_window_years: Optional[int] = typer.Option(None, "--regime-window-years", help="Lookback window in years for regime estimation"),
+    transaction_cost: Optional[float] = typer.Option(None, "--tc", help="Per-trade transaction cost (e.g., 0.0005)"),
+    min_obs: Optional[int] = typer.Option(None, "--min-obs", help="Minimum observations for regime estimation before blending"),
+    mean_cov_method: Optional[str] = typer.Option(None, "--mean-cov-method", help="Mean/cov method: sample|shrinkage|bayesian"),
+    risk_free_rate: Optional[float] = typer.Option(None, "--rf", help="Annual risk-free rate for Sharpe/tangency"),
+    blend_probs: Optional[bool] = typer.Option(None, "--blend-probs/--no-blend-probs", help="Blend regime/unconditional using probabilities"),
+    include_cash: Optional[bool] = typer.Option(None, "--include-cash/--no-include-cash", help="Include synthetic CASH asset using periodic risk-free"),
+    cash_name: Optional[str] = typer.Option(None, "--cash-name", help="Name of cash asset column"),
+    blend_alpha: Optional[float] = typer.Option(None, "--blend-alpha", help="Fixed alpha to blend regime and unconditional when min_obs not met"),
+    auto_minvar_if_all_negative: Optional[bool] = typer.Option(None, "--auto-minvar/--no-auto-minvar", help="Switch to min-variance if all excess premia ≤ 0 and CASH not allowed"),
 ) -> None:
     """Run the full pipeline (equivalent to main.py).
 
@@ -130,6 +141,29 @@ def run_full(
 
     analysis_results = analyze_regime_performance(macro_data_with_regimes, asset_returns)
     create_visualizations(macro_data_with_regimes, analysis_results)
+    # Persist overrides into YAML config so downstream (main.py) reads them
+    overrides = {}
+    if rebal_freq:
+        overrides["REBAL_FREQ"] = rebal_freq
+    if regime_window_years is not None:
+        overrides["REGIME_WINDOW_YEARS"] = int(regime_window_years)
+    if transaction_cost is not None:
+        overrides["TRANSACTION_COST"] = float(transaction_cost)
+    if min_obs is not None:
+        overrides["MIN_OBS"] = int(min_obs)
+    if mean_cov_method:
+        overrides["MEAN_COV_METHOD"] = str(mean_cov_method)
+    if risk_free_rate is not None:
+        overrides["RISK_FREE_RATE"] = float(risk_free_rate)
+    if blend_probs is not None:
+        overrides["BLEND_PROBS"] = bool(blend_probs)
+    if overrides:
+        try:
+            cfg = load_yaml_config() or {}
+            cfg.update(overrides)
+            _save_yaml_config(cfg)
+        except Exception:
+            pass
     create_portfolios(analysis_results)
 
     # Build Excel workbook and open it

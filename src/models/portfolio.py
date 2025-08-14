@@ -17,6 +17,7 @@ Key Features:
 import pandas as pd
 import numpy as np
 import logging
+import os
 from scipy.optimize import minimize
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
@@ -90,6 +91,8 @@ class PortfolioConstructor:
         self.risk_free_rate = risk_free_rate
         self.constraints = constraints or PortfolioConstraints()
         self.last_weights: Optional[pd.Series] = None
+        # Internal flag to control whether mean passed to tangency/min-var is already excess
+        self._assume_mean_is_excess: bool = False
         logger.info("Initialized PortfolioConstructor")
 
     # ================= Mean-Covariance Estimation ======================
@@ -128,6 +131,17 @@ class PortfolioConstructor:
             mu_b = lam * mu + (1 - lam) * prior
             return mu_b, S
         return mu, S
+
+    @staticmethod
+    def to_periodic_rf(rf_annual: float, periods: int) -> float:
+        """Convert annual risk-free rate to per-period rate via compounding.
+        rf_period = (1 + rf_annual)**(1/periods) - 1
+        """
+        try:
+            p = max(1, int(periods))
+            return float((1.0 + float(rf_annual)) ** (1.0 / p) - 1.0)
+        except Exception:
+            return float(rf_annual) / max(1, int(periods) if periods else 12)
     
     def _infer_annualization_factor_from_index(self, index: pd.DatetimeIndex) -> int:
         """Infer annualization factor from a DatetimeIndex frequency.
@@ -283,20 +297,19 @@ class PortfolioConstructor:
                              weights: np.ndarray, 
                              returns: pd.Series, 
                              covariance: pd.DataFrame,
-                              risk_free_rate: float = None,
                               periods_per_year: int = 252,
                               turnover_penalty: float = 0.0,
                               prev_weights: Optional[np.ndarray] = None) -> float:
         """Calculate negative Sharpe ratio (for minimization)"""
-        if risk_free_rate is None:
-            risk_free_rate = self.risk_free_rate
-        
         # Always keep finite values for optimizer stability
         eps = 1e-12
-        portfolio_return = self._portfolio_return(weights, returns) * periods_per_year  # Annualize
+        # Use excess returns once via periodic rf
+        rf_per_period = self.to_periodic_rf(self.risk_free_rate, periods_per_year)
+        returns_excess = returns - rf_per_period
+        portfolio_return = self._portfolio_return(weights, returns_excess) * periods_per_year  # Annualize excess
         variance = max(self._portfolio_variance(weights, covariance), 0.0)
         portfolio_volatility = np.sqrt(variance) * np.sqrt(periods_per_year) + eps
-        ratio = (portfolio_return - risk_free_rate) / portfolio_volatility
+        ratio = portfolio_return / portfolio_volatility
         if not np.isfinite(ratio):
             # Penalize non-finite objective
             ratio = -1e9
@@ -338,6 +351,23 @@ class PortfolioConstructor:
         """Build weight bounds for optimization"""
         return [(self.constraints.min_weight, self.constraints.max_weight) 
                 for _ in range(n_assets)]
+
+    def _preflight_feasible(self, lb: np.ndarray, ub: np.ndarray, max_positions: Optional[int] = None) -> None:
+        """Feasibility checks before invoking the optimizer.
+        - lb and ub are arrays of per-asset lower/upper bounds.
+        Raises ValueError with clear message if infeasible.
+        """
+        if lb.shape != ub.shape:
+            raise ValueError("lb/ub shape mismatch")
+        bad = np.where(lb > ub)[0]
+        if bad.size > 0:
+            raise ValueError(f"Lower bound exceeds upper for assets at idx={bad.tolist()}")
+        if float(lb.sum()) > 1.0 + 1e-12:
+            raise ValueError(f"sum(lb)={float(lb.sum()):.3f} > 1")
+        if float(ub.sum()) < 1.0 - 1e-12:
+            raise ValueError(f"sum(ub)={float(ub.sum()):.3f} < 1")
+        if max_positions is not None and int((lb > 0).sum()) > int(max_positions):
+            raise ValueError("floors exceed max_positions")
     
     def optimize_portfolio(self, 
                          regime_stats: Dict[str, Dict], 
@@ -345,7 +375,8 @@ class PortfolioConstructor:
                          method: OptimizationMethod = OptimizationMethod.SHARPE,
                           custom_constraints: Optional[List[Dict]] = None,
                           mean_cov_method: str = "shrinkage",
-                          turnover_penalty: float = 0.0) -> PortfolioResult:
+                          turnover_penalty: float = 0.0,
+                          mean_is_excess: bool = False) -> PortfolioResult:
         """
         Optimize portfolio for a specific regime using specified method.
         
@@ -365,8 +396,7 @@ class PortfolioConstructor:
                 raise ValueError(f"Regime '{regime}' not found in statistics")
             
             stats = regime_stats[regime]
-            # Estimate robust mean/cov
-            # Build a tiny 2-row frame carrying the asset column order; use concat (append removed in pandas>=2)
+            # Estimate robust mean/cov using requested method; prefer shrunk mean too
             base = pd.DataFrame(stats['mean_returns']).T.reindex(columns=stats['mean_returns'].index)
             row = pd.DataFrame([stats['mean_returns']])
             est_input = pd.concat([base, row], ignore_index=True).dropna(axis=1, how='all')
@@ -374,9 +404,10 @@ class PortfolioConstructor:
                 est_input,
                 method=mean_cov_method,
             )
-            # Use raw mean estimates (more stable across tiny est_input) but shrinkage covariance
-            returns = stats['mean_returns'] if isinstance(est_mu, pd.Series) else stats['mean_returns']
+            # Use the estimated (possibly shrunk) mean and covariance when available
+            returns = est_mu if isinstance(est_mu, pd.Series) else stats['mean_returns']
             covariance = est_cov if isinstance(est_cov, pd.DataFrame) else stats['covariance']
+            covariance = self._near_psd(covariance)
             n_assets = len(returns)
             
             # Handle equal weight case
@@ -393,9 +424,28 @@ class PortfolioConstructor:
                 constraints.extend(custom_constraints)
             
             bounds = self._build_bounds(n_assets)
+            # Preflight feasibility check
+            lb = np.array([b[0] for b in bounds], dtype=float)
+            ub = np.array([b[1] for b in bounds], dtype=float)
+            try:
+                self._preflight_feasible(lb, ub, self.constraints.max_positions)
+                logger.info("Preflight bounds: lb_sum=%.3f ub_sum=%.3f max_pos=%s", float(lb.sum()), float(ub.sum()), str(self.constraints.max_positions))
+            except Exception as exc:
+                logger.error("Bounds infeasible: %s", exc)
+                # Deterministic fallback path
+                w = self._analytic_fallback_weights(returns, covariance, method)
+                return self._create_portfolio_result(w, returns, covariance, method.value, regime, False, periods_per_year)
             
             # Define objective function based on method
             periods_per_year = regime_stats[regime].get('periods_per_year', 12)
+            # Stash for fallback analytics (tangency needs rf per period)
+            try:
+                self._last_periods_per_year = int(periods_per_year)
+            except Exception:
+                self._last_periods_per_year = 12
+            # Record whether the mean vector is already excess
+            old_flag = self._assume_mean_is_excess
+            self._assume_mean_is_excess = bool(mean_is_excess)
             prev_w = self.last_weights.values if isinstance(self.last_weights, pd.Series) and len(self.last_weights) == n_assets else None
             if method == OptimizationMethod.SHARPE:
                 objective_func = lambda w: self._negative_sharpe_ratio(w, returns, covariance, periods_per_year=periods_per_year, turnover_penalty=turnover_penalty, prev_weights=prev_w)
@@ -437,8 +487,23 @@ class PortfolioConstructor:
             # Handle optimization failure
             if not result.success:
                 logger.warning(f"Optimization failed for regime {regime} with method {method.value}: {result.message}")
-                logger.warning("Falling back to analytic projection (no equal-weight fallback)")
-                weights = self._analytic_fallback_weights(returns, covariance, method)
+                logger.warning("Falling back to analytic projection")
+                # Deterministic fallback chain: tangency -> min-var -> equal
+                try:
+                    w_tan = self._tangency_weights(returns, covariance)
+                    if np.isfinite(w_tan).all() and w_tan.sum() > 0:
+                        weights = w_tan
+                    else:
+                        raise RuntimeError("tangency invalid")
+                except Exception:
+                    try:
+                        w_mv = self._min_variance_weights(returns, covariance)
+                        if np.isfinite(w_mv).all() and w_mv.sum() > 0:
+                            weights = w_mv
+                        else:
+                            raise RuntimeError("min-var invalid")
+                    except Exception:
+                        weights = np.ones(n_assets) / n_assets
                 success = False
             else:
                 weights = result.x
@@ -453,14 +518,18 @@ class PortfolioConstructor:
                     weights = self.last_weights.values + t * (weights - self.last_weights.values)
             result_out = self._create_portfolio_result(weights, returns, covariance, method.value, regime, success, periods_per_year)
             self.last_weights = result_out.weights
+            # Restore flag
+            self._assume_mean_is_excess = old_flag
             return result_out
             
         except Exception as e:
             logger.error(f"Error optimizing portfolio for regime {regime}: {e}")
             # Robust analytic fallback (no equal-weight)
             mean = regime_stats[regime]['mean_returns']
-            cov = regime_stats[regime]['covariance']
+            cov = self._near_psd(regime_stats[regime]['covariance'])
             weights = self._analytic_fallback_weights(mean, cov, method)
+            # Ensure we restore the state flag
+            self._assume_mean_is_excess = False
             return self._create_portfolio_result(
                 weights,
                 mean,
@@ -481,10 +550,11 @@ class PortfolioConstructor:
         """Create a PortfolioResult object from optimization results"""
         weights_series = pd.Series(weights, index=returns.index)
         
-        expected_return = self._portfolio_return(weights, returns) * periods_per_year  # Annualized
+        rf_per_period = self.to_periodic_rf(self.risk_free_rate, periods_per_year)
+        expected_return = self._portfolio_return(weights, returns - rf_per_period) * periods_per_year  # Annualized excess
         expected_volatility = np.sqrt(self._portfolio_variance(weights, covariance)) * np.sqrt(periods_per_year)
         
-        sharpe_ratio = (expected_return - self.risk_free_rate) / expected_volatility if expected_volatility > 0 else 0
+        sharpe_ratio = expected_return / expected_volatility if expected_volatility > 0 else 0
         
         return PortfolioResult(
             weights=weights_series,
@@ -517,14 +587,35 @@ class PortfolioConstructor:
         return np.maximum(w - tau, 0.0)
 
     def _tangency_weights(self, mean: pd.Series, cov: pd.DataFrame) -> np.ndarray:
-        """Compute long-only tangency weights proportional to inv(Sigma) * mu, projected to simplex."""
+        """Compute long-only tangency weights proportional to inv(Sigma) * (mu_excess), projected to simplex.
+        If self._assume_mean_is_excess is True, `mean` is treated as already excess.
+        Otherwise we subtract periodic rf exactly once.
+        """
         Sigma = cov.values
-        mu = mean.values
+        # Subtract per-period risk-free from mean to use excess returns
+        ppy = getattr(self, "_last_periods_per_year", 12)
+        rf_per_period = self.to_periodic_rf(self.risk_free_rate, ppy)
+        mu = mean.values if self._assume_mean_is_excess else (mean.values - rf_per_period)
         inv = np.linalg.pinv(Sigma)
         raw = inv.dot(mu)
         if not np.all(np.isfinite(raw)):
             return self._min_variance_weights(mean, cov)
         return self._project_to_simplex(raw, 1.0)
+
+    @staticmethod
+    def _near_psd(S: pd.DataFrame) -> pd.DataFrame:
+        """Return a near-PSD covariance by symmetrizing, eigen clipping, and small ridge."""
+        try:
+            A = 0.5 * (S.values + S.values.T)
+            w, V = np.linalg.eigh(A)
+            w_clipped = np.clip(w, 1e-10, None)
+            A_psd = (V * w_clipped) @ V.T
+            A_psd = A_psd + np.eye(A_psd.shape[0]) * 1e-10
+            return pd.DataFrame(A_psd, index=S.index, columns=S.columns)
+        except Exception:
+            # Diagonal fallback
+            diag = np.diag(np.maximum(np.diag(S.values), 1e-10))
+            return pd.DataFrame(diag, index=S.index, columns=S.columns)
 
     def _min_variance_weights(self, mean: pd.Series, cov: pd.DataFrame) -> np.ndarray:
         """Compute long-only minimum-variance weights proportional to inv(Sigma) * 1, projected to simplex."""
@@ -540,13 +631,25 @@ class PortfolioConstructor:
 
     def _analytic_fallback_weights(self, mean: pd.Series, cov: pd.DataFrame, method: OptimizationMethod) -> np.ndarray:
         """Deterministic fallback without optimizer: try tangency then min-var; ensure feasible."""
-        if method in (OptimizationMethod.SHARPE, OptimizationMethod.MAX_RETURN):
-            w = self._tangency_weights(mean, cov)
-        elif method == OptimizationMethod.MIN_VARIANCE:
-            w = self._min_variance_weights(mean, cov)
-        else:
-            w = self._min_variance_weights(mean, cov)
-        return w
+        try:
+            if method in (OptimizationMethod.SHARPE, OptimizationMethod.MAX_RETURN):
+                w = self._tangency_weights(mean, cov)
+            elif method == OptimizationMethod.MIN_VARIANCE:
+                w = self._min_variance_weights(mean, cov)
+            else:
+                w = self._min_variance_weights(mean, cov)
+            if np.all(np.isfinite(w)) and w.sum() > 0:
+                return self._project_to_simplex(w, 1.0)
+        except Exception:
+            pass
+        # Final fallback: single highest-mean asset
+        try:
+            best = mean.idxmax()
+            w = np.zeros(len(mean))
+            w[list(mean.index).index(best)] = 1.0
+            return w
+        except Exception:
+            return np.ones(len(mean)) / len(mean)
     
     def _check_constraints(self, weights: pd.Series) -> bool:
         """
@@ -784,29 +887,47 @@ def create_equal_weight_portfolio(returns_df):
 
 
 def create_sixty_forty_benchmark(returns_df: pd.DataFrame) -> Optional[pd.Series]:
-    """Create a 60/40 stock/bond benchmark from available columns.
+    """Create a 60/40 stock/bond benchmark.
 
-    Heuristics are used to detect stock and bond columns by name. If multiple
-    candidates exist, equal-weight within each bucket, then combine as 60% stocks
-    and 40% bonds. Falls back to simple equal-weight across all assets if either
-    bucket is empty.
+    Preference (strict):
+    - Stocks: S&P 500 via 'SPX' (fallbacks: '^GSPC', 'SP500')
+    - Bonds: 10Y via 'US10Y_NOTE_FUT' (fallbacks: 'IEF')
+
+    If both are found, use exactly those two series: 0.6*SPX + 0.4*US10Y.
+    Else, fallback to earlier heuristics; if still unavailable, equal-weight all assets.
     """
     try:
         if returns_df is None or returns_df.empty:
             return None
         cols = list(returns_df.columns)
-        lower_map = {c: str(c).upper() for c in cols}
-        stock_pref = ["SPX", "SP500", "^GSPC", "SPTR", "EQUITY", "STOCK"]
-        bond_pref = ["US10Y_NOTE_FUT", "US30Y_BOND_FUT", "ZN", "ZB", "IEF", "AGG", "BOND"]
-        stocks = [c for c in cols if any(k in lower_map[c] for k in stock_pref)]
-        bonds = [c for c in cols if any(k in lower_map[c] for k in bond_pref)]
-        if len(stocks) == 0 or len(bonds) == 0:
-            # fallback: equal-weight across all assets
-            n = returns_df.shape[1]
-            w = np.ones(n) / n
-            return returns_df.dot(w)
-        stocks_ret = returns_df[stocks].mean(axis=1)
-        bonds_ret = returns_df[bonds].mean(axis=1)
+        upper = {c: str(c).upper() for c in cols}
+        # Strict picks
+        stock_col = None
+        for k in ("SPX", "^GSPC", "SP500"):
+            stock_col = next((c for c in cols if upper[c] == k), None)
+            if stock_col is not None:
+                break
+        bond_col = None
+        for k in ("US10Y_NOTE_FUT", "IEF"):
+            bond_col = next((c for c in cols if upper[c] == k), None)
+            if bond_col is not None:
+                break
+        if stock_col is not None and bond_col is not None:
+            stocks_ret = returns_df[stock_col]
+            bonds_ret = returns_df[bond_col]
+        else:
+            # Heuristic fallback
+            stock_pref = ["SPX", "SP500", "^GSPC", "SPTR", "EQUITY", "STOCK"]
+            bond_pref = ["US10Y_NOTE_FUT", "US30Y_BOND_FUT", "ZN", "ZB", "IEF", "AGG", "BOND"]
+            stocks = [c for c in cols if any(k == upper[c] or k in upper[c] for k in stock_pref)]
+            bonds = [c for c in cols if any(k == upper[c] or k in upper[c] for k in bond_pref)]
+            if len(stocks) == 0 or len(bonds) == 0:
+                # fallback: equal-weight across all assets
+                n = returns_df.shape[1]
+                w = np.ones(n) / n
+                return returns_df.dot(w)
+            stocks_ret = returns_df[stocks].mean(axis=1)
+            bonds_ret = returns_df[bonds].mean(axis=1)
         benchmark = 0.6 * stocks_ret + 0.4 * bonds_ret
         benchmark.name = 'benchmark_60_40'
         return benchmark
@@ -909,9 +1030,19 @@ def compute_dynamic_regime_portfolio(
     regime_window_years: int = 10,
     method: OptimizationMethod = OptimizationMethod.SHARPE,
     rebal_freq: str = "M",
-    transaction_cost: float = 0.0005,
+    transaction_cost: float = 0.0,
     probability_blending: bool = False,
+    blend_probs: bool = False,
     regime_probabilities: Optional[pd.DataFrame] = None,
+    min_obs: int = 36,
+    mean_cov_method: str = "shrinkage",
+    risk_free_rate: Optional[float] = None,
+    include_cash: bool = True,
+    cash_name: str = "CASH",
+    blend_alpha: float = 0.5,
+    auto_minvar_if_all_negative: bool = True,
+    return_diagnostics: bool = False,
+    debug: bool = False,
 ) -> Tuple[pd.Series, Dict[pd.Timestamp, pd.Series]]:
     """Dynamic regime-aware portfolio with rebalancing on regime change or schedule.
 
@@ -927,9 +1058,16 @@ def compute_dynamic_regime_portfolio(
     ann = _annualization_factor(rts.index)
     window = pd.DateOffset(years=int(regime_window_years))
 
-    pc = PortfolioConstructor()
+    # Risk-free rate exposure
+    pc = PortfolioConstructor(risk_free_rate=risk_free_rate if risk_free_rate is not None else 0.02)
+    # Synthesize CASH if requested and missing
+    if include_cash and (cash_name not in rts.columns):
+        rf_p = PortfolioConstructor.to_periodic_rf(pc.risk_free_rate, ann)
+        rts = rts.copy()
+        rts[cash_name] = rf_p
     last_w = pd.Series(0.0, index=rts.columns)
     weights_hist: Dict[pd.Timestamp, pd.Series] = {}
+    diags: Dict[pd.Timestamp, Dict[str, Union[str, float, int, bool]]] = {}
     port_r = pd.Series(0.0, index=rts.index)
     prev_reg = None
     last_rebal = None
@@ -952,10 +1090,37 @@ def compute_dynamic_regime_portfolio(
             sub = rts.loc[mask]
             hard = regimes.loc[mask] == cur_reg
             sub_reg = sub[hard.values]
-            if len(sub_reg) < 6:
-                sub_reg = sub.tail(min(len(sub), 60))
-            mu = sub_reg.mean()
-            cov = sub_reg.cov()
+            # Expand to earlier same-regime data if not enough observations within window
+            if len(sub_reg) < int(max(1, min_obs)):
+                mask_all = (rts.index <= dt) & (regimes.reindex(rts.index).ffill() == cur_reg)
+                sub_reg_all = rts.loc[mask_all]
+                if len(sub_reg_all) > len(sub_reg):
+                    sub_reg = sub_reg_all
+            # Compute regime-only estimates first
+            if len(sub_reg) == 0:
+                sub_reg = sub  # fallback to unconditional if no same-regime data exists
+            mu_reg = sub_reg.mean()
+            cov_reg = sub_reg.cov()
+            mu_uncond = sub.mean()
+            cov_uncond = sub.cov()
+            # Blend only if explicitly requested via flags and probabilities available; else use regime-only
+            if (blend_probs or probability_blending) and regime_probabilities is not None:
+                try:
+                    cur_probs = regime_probabilities.reindex(index=[dt]).iloc[0]
+                    alpha_p = float(cur_probs.get(str(cur_reg), cur_probs.max()))
+                    alpha_p = max(0.0, min(1.0, alpha_p))
+                except Exception:
+                    alpha_p = 1.0
+                mu = alpha_p * mu_reg + (1 - alpha_p) * mu_uncond
+                cov = alpha_p * cov_reg + (1 - alpha_p) * cov_uncond
+            else:
+                # If regime-only slice is still short, allow fixed alpha blending for robustness
+                if len(sub_reg) < int(max(1, min_obs)):
+                    a = max(0.0, min(1.0, float(blend_alpha)))
+                    mu = a * mu_reg + (1 - a) * mu_uncond
+                    cov = a * cov_reg + (1 - a) * cov_uncond
+                else:
+                    mu, cov = mu_reg, cov_reg
             # Clean and stabilize covariance
             cov = cov.replace([np.inf, -np.inf], np.nan)
             cov = cov.fillna(0.0)
@@ -967,18 +1132,25 @@ def compute_dynamic_regime_portfolio(
             except Exception:
                 diag_mat = np.diag(np.diag(cov.values)) + np.eye(len(cov)) * 1e-6
                 cov = pd.DataFrame(diag_mat, index=cov.index, columns=cov.columns)
-            if probability_blending and regime_probabilities is not None:
-                try:
-                    cur_probs = regime_probabilities.reindex(index=[dt]).iloc[0]
-                    alpha = float(cur_probs.get(str(cur_reg), cur_probs.max()))
-                    alpha = max(0.0, min(1.0, alpha))
-                    mu_uncond = sub.mean()
-                    cov_uncond = sub.cov()
-                    mu = alpha * mu + (1 - alpha) * mu_uncond
-                    cov = alpha * cov + (1 - alpha) * cov_uncond
-                except Exception:
-                    pass
-            # Degenerate covariance or zero variance: choose highest-mean asset as heuristic
+            cov = pc._near_psd(cov)
+            # Excess means and diagnostics
+            rf_p = PortfolioConstructor.to_periodic_rf(pc.risk_free_rate, ann)
+            mu_excess = mu - rf_p
+            pos_excess_count = int((mu_excess > 0).sum())
+            median_excess_mu = float(mu_excess.median()) if len(mu_excess) else 0.0
+            # Cond number for covariance
+            try:
+                svals = np.linalg.svd(cov.values, compute_uv=False)
+                cov_cond_number = float((svals.max() / max(svals.min(), 1e-12)) if len(svals) else np.inf)
+            except Exception:
+                cov_cond_number = float('inf')
+            used_window_len = int(len(sub_reg))
+            method_used = "solver"
+            blending_used = bool((blend_probs or probability_blending) and regime_probabilities is not None) or (len(sub_reg) < int(max(1, min_obs)))
+            if pos_excess_count == 0:
+                logger.info("All excess means ≤ 0; selecting min-variance or allocating to CASH.")
+
+            # Degenerate covariance check
             degenerate = False
             try:
                 diag = np.diag(cov.values) if isinstance(cov, pd.DataFrame) else np.array([])
@@ -986,31 +1158,105 @@ def compute_dynamic_regime_portfolio(
             except Exception:
                 degenerate = True
 
+            used_cash_flag = False
             if degenerate and mu.notna().any():
-                best = mu.idxmax()
-                w = pd.Series(0.0, index=rts.columns)
-                if best in w.index:
-                    w.loc[best] = 1.0
+                # Fallback: try minimum-variance long-only; if it degenerates to equal weights while
+                # means are clearly distinct, allocate to highest-mean asset as final fallback
+                try:
+                    w_arr = pc._min_variance_weights(mu, cov)
+                    w = pd.Series(w_arr, index=rts.columns).reindex(rts.columns).fillna(0.0)
+                    if (not np.isfinite(w.values).all()) or w.sum() == 0:
+                        raise RuntimeError("invalid min-var weights")
+                    # Detect near-equal weights outcome on degenerate cov
+                    if (w.max() - w.min()) < 1e-9 and (float(mu.max()) - float(mu.min())) > 1e-9:
+                        raise RuntimeError("min-var uninformative; prefer highest-mean")
+                    method_used = "min_variance"
+                except Exception:
+                    # If CASH available and all excess ≤ 0, allow full CASH allocation
+                    if include_cash and (cash_name in rts.columns) and pos_excess_count == 0:
+                        w = pd.Series(0.0, index=rts.columns)
+                        w.loc[cash_name] = 1.0
+                        method_used = "cash_full"
+                        used_cash_flag = True
+                    else:
+                        best = mu.idxmax()
+                        w = pd.Series(0.0, index=rts.columns)
+                        if best in w.index:
+                            w.loc[best] = 1.0
+                        method_used = "highest_mean"
             else:
+                # If all excess ≤0 and CASH exists, allow allocation to CASH by passing mean as excess and letting optimizer consider CASH
                 stats = {str(cur_reg): {"mean_returns": mu, "covariance": cov, "periods_per_year": ann}}
-                res = pc.optimize_portfolio(stats, str(cur_reg), method, mean_cov_method="shrinkage")
+                # Guardrail: if all excess are non-positive and CASH is not included or not allowed, switch to min-var
+                chosen_method = method
+                if pos_excess_count == 0 and (not include_cash or cash_name not in rts.columns) and auto_minvar_if_all_negative:
+                    chosen_method = OptimizationMethod.MIN_VARIANCE
+                res = pc.optimize_portfolio(stats, str(cur_reg), chosen_method, mean_cov_method=mean_cov_method, mean_is_excess=False)
                 if (not res.optimization_success) or (not np.isfinite(res.weights.values).all()):
-                    # Fallback: pick asset with highest mean return
-                    best = mu.idxmax()
-                    w = pd.Series(0.0, index=rts.columns)
-                    if best in w.index:
-                        w.loc[best] = 1.0
+                    # Fallback: minimum-variance; final fallback highest-mean if uninformative
+                    try:
+                        w_arr = pc._min_variance_weights(mu, cov)
+                        w = pd.Series(w_arr, index=rts.columns).reindex(rts.columns).fillna(0.0)
+                        if (not np.isfinite(w.values).all()) or w.sum() == 0 or ((w.max() - w.min()) < 1e-9 and (float(mu.max()) - float(mu.min())) > 1e-9):
+                            raise RuntimeError("uninformative min-var")
+                        method_used = "min_variance"
+                    except Exception:
+                        if include_cash and (cash_name in rts.columns) and pos_excess_count == 0:
+                            w = pd.Series(0.0, index=rts.columns)
+                            w.loc[cash_name] = 1.0
+                            method_used = "cash_full"
+                            used_cash_flag = True
+                        else:
+                            best = mu.idxmax()
+                            w = pd.Series(0.0, index=rts.columns)
+                            if best in w.index:
+                                w.loc[best] = 1.0
+                            method_used = "highest_mean"
                 else:
                     w = res.weights.reindex(rts.columns).fillna(0.0)
+                    method_used = res.method_used
             turnover = (w - last_w).abs().sum()
-            # apply cost once at rebalance
-            cost = transaction_cost * float(turnover)
+            # apply cost once at rebalance (optional)
+            cost = (transaction_cost * float(turnover)) if (transaction_cost and transaction_cost > 0.0) else 0.0
             weights_hist[dt] = w
             last_w = w
             last_rebal = dt
-            port_r.loc[dt] = float(rts.loc[dt].dot(last_w)) - cost
+            port_r.loc[dt] = float(rts.loc[dt].dot(last_w)) - float(cost)
+            # Save diagnostics
+            diags[dt] = {
+                'periodic_rf': float(rf_p),
+                'pos_excess_count': int(pos_excess_count),
+                'median_excess_mu': float(median_excess_mu),
+                'cov_cond_number': float(cov_cond_number),
+                'used_window_len': int(used_window_len),
+                'method_used': str(method_used),
+                'blending_used': bool(blending_used),
+                'used_cash': bool(used_cash_flag),
+                'regime': str(cur_reg),
+                'realised_return': float(rts.loc[dt].dot(last_w)),
+                'lb_sum': float(0.0),
+                'ub_sum': float(1.0),
+                'max_positions': int(pc.constraints.max_positions) if pc.constraints.max_positions else 0,
+            }
+            logger.info("%s | reg=%s n_obs=%d pos_excess=%d med_excess=%.6f method=%s used_cash=%s blend=%s",
+                        dt.strftime('%Y-%m-%d'), str(cur_reg), int(used_window_len), int(pos_excess_count), float(median_excess_mu), str(method_used), str(bool(used_cash_flag)), str(bool(blending_used)))
         else:
             port_r.loc[dt] = float(rts.loc[dt].dot(last_w))
         prev_reg = cur_reg
 
+    # Optional debug CSV
+    if debug and diags:
+        try:
+            out_dir = os.path.join("Output", "diagnostics")
+            os.makedirs(out_dir, exist_ok=True)
+            import pandas as _pd
+            dbg = _pd.DataFrame.from_dict(diags, orient='index')
+            dbg.index.name = 'date'
+            dbg.reset_index().to_csv(os.path.join(out_dir, 'portfolio_debug.csv'), index=False)
+        except Exception:
+            logger.debug("Failed to write portfolio_debug.csv", exc_info=True)
+
+    if return_diagnostics:
+        # type: ignore[return-value]
+        return port_r, {'weights': weights_hist, 'diagnostics': diags}  # for optional richer output
     return port_r, weights_hist
