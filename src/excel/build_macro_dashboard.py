@@ -17,6 +17,19 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font
 from openpyxl.chart import BarChart, Reference
 try:
+    from src.charts.theme_charts import (
+        build_growth_sheet,
+        build_housing_sheet,
+        build_inflation_sheet,
+        build_credit_sheet,
+    )
+except Exception:  # pragma: no cover
+    build_growth_sheet = build_housing_sheet = build_inflation_sheet = build_credit_sheet = None  # type: ignore
+try:
+    from config import config as CHART_CFG  # type: ignore
+except Exception:  # pragma: no cover
+    CHART_CFG = object()
+try:
     # Optional: portfolio/dashboard configuration for display
     from config.config import REGIME_WINDOW_YEARS, REBAL_FREQ, TRANSACTION_COST
 except Exception:  # pragma: no cover
@@ -177,11 +190,19 @@ def render_plot_trend(theme: str, df: pd.DataFrame, outdir: Path) -> Optional[Pa
     try:
         color = THEME_COLOR.get(theme, "#1f77b4")
         fig, ax = plt.subplots(figsize=(7.4, 3.8))
-        df["ThemeComposite"].plot(ax=ax, color=color, linewidth=1.8, label="Composite")
-        if "ThemeComposite_3M_MA" in df.columns:
-            df["ThemeComposite_3M_MA"].plot(ax=ax, color="#999999", linewidth=1.5, linestyle="--", label="3M MA")
+        # Show full history when short; otherwise show the most recent ~15 years (180 months)
+        base = df
+        try:
+            if isinstance(df.index, pd.DatetimeIndex) and len(df) > 180:
+                base = df.tail(180)
+        except Exception:
+            base = df
+        base["ThemeComposite"].plot(ax=ax, color=color, linewidth=1.8, label="Composite")
+        if "ThemeComposite_3M_MA" in base.columns:
+            base["ThemeComposite_3M_MA"].plot(ax=ax, color="#999999", linewidth=1.5, linestyle="--", label="3M MA")
         ax.set_title(f"{theme} Composite — Trend")
         ax.set_ylabel("Index")
+        ax.set_xlabel("Date")
         ax.grid(True, alpha=0.25)
         ax.legend(loc="best")
         return _save_plot(fig, outdir, f"{theme.replace(' & ', '_').replace(' ', '_').lower()}_trend.png")
@@ -195,6 +216,7 @@ def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> O
         fig, ax = plt.subplots(figsize=(7.4, 3.8))
         t = theme
         m = monthly
+        used_ax2 = False
         if t == "Growth & Labour":
             # Business cycle clock: GDP_YoY vs UNRATE, colored by date order
             if all(c in m.columns for c in ("GDP_YoY", "UNRATE")):
@@ -226,13 +248,16 @@ def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> O
                 else:
                     ax2 = ax.twinx()
                     rr.tail(180).plot(ax=ax2, color="#444444", linewidth=1.5, label="Real Policy Rate")
+                    ax2.set_ylabel("Real Rate (%)")
                     ax2.set_ylim(rr.tail(180).min()*1.1, rr.tail(180).max()*1.1)
+                    used_ax2 = True
                 plotted = True
             if not plotted:
                 ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
                 ax.set_axis_off()
             else:
                 ax.set_title("CPI Contributions & Real Policy Rate")
+                ax.set_xlabel("Date")
 
         elif t == "Credit & Risk":
             # IG spread (BAA-AAA) and NFCI stress if available
@@ -240,10 +265,14 @@ def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> O
             if all(c in m.columns for c in ("BAA", "AAA")):
                 ig = (pd.to_numeric(m["BAA"], errors="coerce") - pd.to_numeric(m["AAA"], errors="coerce")).dropna()
                 ig.tail(180).plot(ax=ax, color="#cc5500", linewidth=1.5, label="IG Spread (BAA-AAA)")
+                ax.set_ylabel("Spread (pp)")
                 plotted = True
             if "NFCI" in m.columns:
                 ax2 = ax.twinx() if plotted else ax
                 pd.to_numeric(m["NFCI"], errors="coerce").tail(180).plot(ax=ax2, color="#5555aa", linewidth=1.2, label="NFCI")
+                if ax2 is not ax:
+                    ax2.set_ylabel("NFCI")
+                    used_ax2 = True
                 plotted = True
             if not plotted:
                 ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
@@ -251,6 +280,7 @@ def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> O
             else:
                 ax.set_title("Credit Spreads & Financial Stress")
                 ax.grid(True, axis="y", alpha=0.2)
+                ax.set_xlabel("Date")
 
         elif t == "Housing":
             # Permits vs Starts; mortgage rate if available
@@ -258,37 +288,66 @@ def render_theme_signature(theme: str, monthly: pd.DataFrame, outdir: Path) -> O
             cols = [c for c in ("PERMIT", "HOUST") if c in m.columns]
             if cols:
                 pd.DataFrame({c: pd.to_numeric(m[c], errors="coerce") for c in cols}).tail(240).plot(ax=ax, linewidth=1.5)
+                ax.set_ylabel("Index")
                 plotted = True
             if "MORTGAGE30US" in m.columns:
                 ax2 = ax.twinx()
                 pd.to_numeric(m["MORTGAGE30US"], errors="coerce").tail(240).plot(ax=ax2, color="#777777", linewidth=1.2, label="Mortgage 30Y")
+                ax2.set_ylabel("Mortgage 30Y (%)")
+                used_ax2 = True
                 plotted = True
             if not plotted:
                 ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
                 ax.set_axis_off()
             else:
                 ax.set_title("Housing Pipeline & Mortgage Rate")
+                ax.set_xlabel("Date")
 
         elif t == "FX & Commodities":
             # Energy proxy (WTI), Dollar index (TWEX), optional gold if present
             plotted = False
             if "DCOILWTICO" in m.columns:
                 pd.to_numeric(m["DCOILWTICO"], errors="coerce").tail(240).plot(ax=ax, color="#8c564b", linewidth=1.5, label="WTI Oil")
+                ax.set_ylabel("WTI (USD)")
                 plotted = True
             if "TWEXAFEGSMTH" in m.columns:
                 ax2 = ax.twinx() if plotted else ax
                 pd.to_numeric(m["TWEXAFEGSMTH"], errors="coerce").tail(240).plot(ax=ax2, color="#1f77b4", linewidth=1.2, label="Dollar Index")
+                if ax2 is not ax:
+                    ax2.set_ylabel("Dollar Index")
+                    used_ax2 = True
                 plotted = True
             if not plotted:
                 ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
                 ax.set_axis_off()
             else:
                 ax.set_title("Energy & Dollar Index")
+                ax.set_xlabel("Date")
 
         else:
             ax.text(0.1, 0.5, "Data not available", transform=ax.transAxes)
             ax.set_axis_off()
 
+        # Unify legends across primary and twin axes when present
+        try:
+            lines, labels = ax.get_legend_handles_labels()
+            if used_ax2:
+                ax2 = ax.twinx()
+                # immediately remove to avoid double axis; only for legend harvest
+                ax.figure.delaxes(ax2)
+            # Instead, fetch from existing twin if it exists
+        except Exception:
+            pass
+        try:
+            # Safer legend merge: query all axes in the figure
+            handles, labels = [], []
+            for a in fig.axes:
+                h, l = a.get_legend_handles_labels()
+                handles.extend(h); labels.extend(l)
+            if labels:
+                fig.legend(handles, labels, loc="upper right")
+        except Exception:
+            pass
         return _save_plot(fig, outdir, f"{theme.replace(' & ', '_').replace(' ', '_').lower()}_signature.png")
     except Exception:
         return None
@@ -316,6 +375,32 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
         p2 = render_theme_signature(sheetname, monthly, outdir)
         if p2:
             insert_image(ws, p2, "A22", max_width=620, max_height=280)
+    # Also place the new high-signal charts using the same pipeline to avoid
+    # any writer/adapter discrepancies. We read the featured CSV if available,
+    # falling back to the monthly Data Dump.
+    try:
+        if build_growth_sheet:
+            # Load macro_df (featured preferred)
+            macro_df = None
+            try:
+                featured_csv = Path("Data/processed/macro_data_featured.csv")
+                if featured_csv.exists():
+                    macro_df = pd.read_csv(featured_csv, index_col=0, parse_dates=[0])
+            except Exception:
+                macro_df = None
+            if macro_df is None:
+                macro_df = monthly
+            if macro_df is not None and not macro_df.empty:
+                if sheetname == "Growth & Labour" or sheetname == "Growth":
+                    build_growth_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                elif sheetname == "Inflation & Liquidity" or sheetname == "Inflation":
+                    build_inflation_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                elif sheetname == "Credit & Risk" or sheetname == "Credit":
+                    build_credit_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                elif sheetname == "Housing":
+                    build_housing_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+    except Exception:
+        pass
 
 
 def _build_6040_benchmark(returns: pd.DataFrame) -> pd.Series | None:
@@ -678,6 +763,40 @@ def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
             build_theme_sheet(wb, theme, outdir)
         except Exception:
             continue
+    # New high-signal charts via helper builders (gracefully skipped on errors)
+    try:
+        featured_csv = Path("Data/processed/macro_data_featured.csv")
+        macro_df: Optional[pd.DataFrame] = None
+        if featured_csv.exists():
+            try:
+                macro_df = pd.read_csv(featured_csv, index_col=0, parse_dates=[0])
+            except Exception:
+                macro_df = None
+        if macro_df is None:
+            macro_df = load_data_dump_df(wb)
+        if macro_df is not None and not macro_df.empty and build_growth_sheet:
+            sheet_growth = "Growth & Labour" if "Growth & Labour" in wb.sheetnames else ("Growth" if "Growth" in wb.sheetnames else THEME_SHEETS[0])
+            sheet_housing = "Housing" if "Housing" in wb.sheetnames else THEME_SHEETS[-2]
+            sheet_infl = "Inflation & Liquidity" if "Inflation & Liquidity" in wb.sheetnames else ("Inflation" if "Inflation" in wb.sheetnames else THEME_SHEETS[1])
+            sheet_credit = "Credit & Risk" if "Credit & Risk" in wb.sheetnames else ("Credit" if "Credit" in wb.sheetnames else THEME_SHEETS[2])
+            try:
+                build_growth_sheet(macro_df, wb, CHART_CFG, sheet_name=sheet_growth)
+            except Exception:
+                pass
+            try:
+                build_housing_sheet(macro_df, wb, CHART_CFG, sheet_name=sheet_housing)
+            except Exception:
+                pass
+            try:
+                build_inflation_sheet(macro_df, wb, CHART_CFG, sheet_name=sheet_infl)
+            except Exception:
+                pass
+            try:
+                build_credit_sheet(macro_df, wb, CHART_CFG, sheet_name=sheet_credit)
+            except Exception:
+                pass
+    except Exception:
+        pass
     build_dashboard(wb, outdir)
     build_regime_labels(wb, outdir)
     try:

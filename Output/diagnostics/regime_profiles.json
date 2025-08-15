@@ -1,21 +1,44 @@
 {
   "Regime_2": {
     "factor_mean": {
-      "F_Growth": 0.010722104860573393,
-      "F_Inflation": -0.018608924193039996,
-      "F_Liquidity": -0.049491638323765644
+      "F_Growth": -0.0012253836780468379,
+      "F_Inflation": 0.2852242121466009,
+      "F_CreditRisk": 0.04206271905610423,
+      "F_Housing": NaN,
+      "F_External": 0.04000486989762035
     },
     "factor_std": {
-      "F_Growth": 0.7255085025178497,
-      "F_Inflation": 0.5951543492564958,
-      "F_Liquidity": 1.0196927884429878
+      "F_Growth": 0.33695380374966105,
+      "F_Inflation": 0.8395997086838367,
+      "F_CreditRisk": 0.4510236822063076,
+      "F_Housing": NaN,
+      "F_External": 0.580897510464852
     },
-    "count": 60
+    "count": 270
+  },
+  "Regime_0": {
+    "factor_mean": {
+      "F_Growth": 0.06029757382482616,
+      "F_Inflation": 0.04273784647110756,
+      "F_CreditRisk": -0.0784449186427507,
+      "F_Housing": NaN,
+      "F_External": -0.020262401761609736
+    },
+    "factor_std": {
+      "F_Growth": 0.22435839408097097,
+      "F_Inflation": 0.9014481868072527,
+      "F_CreditRisk": 0.3511700299286558,
+      "F_Housing": NaN,
+      "F_External": 0.5111370870512015
+    },
+    "count": 158
   },
   "_meta": {
-    "mean": 60.0,
-    "median": 60.0,
+    "mean": 214.0,
+    "median": 214.0,
     "too_short_share": 0.0,
-    "transitions": {}
+    "transitions": {
+      "Regime_2->Regime_0": 1
+    }
   }
 }
