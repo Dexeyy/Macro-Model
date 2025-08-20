@@ -138,6 +138,17 @@ FRED_SERIES = {
     'PERMITMW': 'Building Permits: Midwest',
     'PERMITS': 'Building Permits: South',
     'PERMITW': 'Building Permits: West',
+    # Demand / sentiment
+    'NAHB': 'NAHB Housing Market Index',
+    'HSN1F': 'New One Family Houses Sold: SAAR',
+    'EXHOSLUSM495S': 'Existing Home Sales: SAAR',
+    # Prices
+    'CSUSHPINSA': 'Case-Shiller National Home Price Index (NSA)',
+    'USSTHPI': 'FHFA House Price Index (NSA)',
+    # Affordability / stock
+    'MORTGAGE30US': '30-Year Fixed Rate Mortgage Average',
+    'MSACSR': 'Months Supply of New Houses (SA)',
+    'MEHOINUSA672N': 'Median Household Income (Nominal, NSA)',
 
     # FX & Commodities
     'TWEXAFEGSMTH': 'Trade Weighted U.S. Dollar Index: Advanced For Economies (Monthly)',
@@ -177,6 +188,9 @@ FRED_ALIASES = {
     'EXCAUSx': 'EXCAUS',
     'OILPRICEx': 'DCOILWTICO',
     'COMPAPFFx': 'COMPAPFF',
+    # Helpful shorthands
+    'MORTGx': 'MORTGAGE30US',
+    'HPIx': 'USSTHPI',
 }
 
 # Transformation code map (FRED-MD tcode): 1=level, 2=diff, 4=diff4, 5=log, 6=diff(log), 7=diff2(log)
@@ -210,6 +224,16 @@ TCODE_MAP = {
     # Housing
     'HOUST': 4, 'HOUSTNE': 4, 'HOUSTMW': 4, 'HOUSTS': 4, 'HOUSTW': 4,
     'PERMIT': 4, 'PERMITNE': 4, 'PERMITMW': 4, 'PERMITS': 4, 'PERMITW': 4,
+
+    # Housing (new)
+    'NAHB': 1,            # level (survey)
+    'HSN1F': 5,           # log-level with diff transform
+    'EXHOSLUSM495S': 5,   # log-level with diff transform
+    'CSUSHPINSA': 6,      # diff(log) ≈ growth
+    'USSTHPI': 6,         # diff(log)
+    'MORTGAGE30US': 1,    # level rate
+    'MSACSR': 1,          # level months' supply
+    'MEHOINUSA672N': 5,   # log-diff (income growth)
 
     # FX & Commodities
     'TWEXAFEGSMTH': 5, 'EXSZUS': 5, 'EXJPUS': 5, 'EXUSUK': 5, 'EXCAUS': 5, 'DCOILWTICO': 6,
@@ -364,6 +388,10 @@ SERIES_SIGN = {
 
     # Dollar (strong USD often a headwind globally)
     "TWEXAFEGSMTH": -1,
+
+    # Housing specifics
+    "MORTGAGE30US": -1,
+    "MSACSR": -1,
 }
 
 # Sub-buckets within each theme to avoid overweighting very dense categories.
@@ -386,6 +414,7 @@ SUB_BUCKETS = {
             "CUSR0000SAS", "PCEPI", "PPICMM", "WPSFD49207", "WPSFD49502",
         ],
         "money": ["M1SL", "M2SL", "M2REAL", "BOGMBASE", "TOTRESNS", "NONBORRES"],
+        "expectations": ["T10YIE", "T5YIFR"],
     },
     "Risk": {
         "spreads": ["AAA", "BAA", "COMPAPFF", "AAAFFM", "BAAFFM"],
@@ -394,8 +423,10 @@ SUB_BUCKETS = {
         "vol_liquidity": ["VIXCLS", "MOVE", "NFCI"],
     },
     "Housing": {
-        "construction": ["HOUST", "HOUSTNE", "HOUSTMW", "HOUSTS", "HOUSTW"],
-        "permits": ["PERMIT", "PERMITNE", "PERMITMW", "PERMITS", "PERMITW"],
+        "activity": ["HOUST", "PERMIT"],
+        "demand": ["NAHB", "HSN1F", "EXHOSLUSM495S"],
+        "prices": ["CSUSHPINSA", "USSTHPI"],
+        "afford": ["MORTGAGE30US", "MSACSR"],
     },
     "FX": {
         "usd": ["TWEXAFEGSMTH"],
@@ -404,8 +435,8 @@ SUB_BUCKETS = {
 }
 
 # Correlation pruning threshold and minimum per-sub-bucket coverage
-PRUNE_CORR_THRESHOLD = 0.95
-MIN_SUB_BUCKET_COVERAGE = 2
+PRUNE_CORR_THRESHOLD = 0.90
+MIN_SUB_BUCKET_COVERAGE = 1
 
 # ---------------------------------------------------------------------------
 # Dynamic regime portfolio settings
@@ -440,3 +471,4 @@ INCLUDE_CASH = True
 CASH_NAME = 'CASH'
 BLEND_ALPHA = 0.5
 AUTO_MINVAR_IF_ALL_NEGATIVE = True
+ON_FAIL = 'equal'
