@@ -167,6 +167,13 @@ FRED_SERIES.update({
     "ICSA": "Initial Jobless Claims",
     "MOVE": "Merrill Lynch Option Volatility Estimate",
 })
+# Optional: curve family for FEATURE_GROUPS completeness
+FRED_SERIES.update({
+    "DGS2": "2-Year Treasury Constant Maturity Rate",
+    "DGS5": "5-Year Treasury Constant Maturity Rate",
+    "DGS10": "10-Year Treasury Constant Maturity Rate",
+    "T10Y2Y": "10-Year Treasury Constant Maturity Minus 2-Year",
+})
 
 # Alias map for FRED-MD styled codes to actual FRED IDs
 FRED_ALIASES = {
@@ -238,6 +245,11 @@ TCODE_MAP = {
     # FX & Commodities
     'TWEXAFEGSMTH': 5, 'EXSZUS': 5, 'EXJPUS': 5, 'EXUSUK': 5, 'EXCAUS': 5, 'DCOILWTICO': 6,
 }
+
+# Transform codes for curve family
+TCODE_MAP.update({
+    "DGS2": 2, "DGS5": 2, "DGS10": 2, "T10Y2Y": 1,
+})
 
 # Asset tickers
 ASSET_TICKERS = {
@@ -392,35 +404,47 @@ SERIES_SIGN = {
     # Housing specifics
     "MORTGAGE30US": -1,
     "MSACSR": -1,
+    # Risk – valuation & conditions
+    "CAPE": -1,
+    "NFCI": -1,
+    # Explicit negative for key spread/levels
+    "AAA": -1,
+    "BAA": -1,
+    "COMPAPFF": -1,
 }
 
 # Sub-buckets within each theme to avoid overweighting very dense categories.
 # Provide representative lists; projects can extend these over time.
 SUB_BUCKETS = {
     "Growth": {
-        "activity": [
-            "INDPRO", "IPFINAL", "IPCONGD", "IPBUSEQ", "CMRMTSPL", "RSAFS", "RPI", "W875RX1",
-        ],
-        "labour": [
-            "PAYEMS", "CE16OV", "USGOOD", "MANEMP", "AWHMAN", "AWOTMAN",
-            "UNRATE", "UEMPMEAN", "ICSA",
-        ],
-        "sentiment": ["UMCSENT"],
+        # Broad activity (production/real sales/income)
+        "activity": ["INDPRO", "CMRMTSPL", "RSAFS", "RPI", "W875RX1"],
+        # Labour (levels & slack)
+        "labour": ["PAYEMS", "CE16OV", "UNRATE", "ICSA", "CUMFNS"],
+        # Orders / capex (early cycle)
         "orders": ["ACOGNO", "AMDMNO", "ANDENO", "AMDMUO"],
+        # Sentiment
+        "sentiment": ["UMCSENT"],
     },
     "Inflation": {
-        "prices": [
-            "CPIAUCSL", "CPIAPPSL", "CPITRNSL", "CPIMEDSL", "CUSR0000SAC", "CUSR0000SAD",
-            "CUSR0000SAS", "PCEPI", "PPICMM", "WPSFD49207", "WPSFD49502",
-        ],
+        # Prices (headline & core families)
+        "prices": ["CPIAUCSL", "PCEPI", "PPICMM", "WPSFD49207", "WPSFD49502"],
+        # Core proxies
+        "core": ["CUSR0000SAC", "CUSR0000SAD", "CUSR0000SAS"],
+        # Money/Liquidity
         "money": ["M1SL", "M2SL", "M2REAL", "BOGMBASE", "TOTRESNS", "NONBORRES"],
+        # Expectations
         "expectations": ["T10YIE", "T5YIFR"],
     },
     "Risk": {
-        "spreads": ["AAA", "BAA", "COMPAPFF", "AAAFFM", "BAAFFM"],
-        "rates": ["FEDFUNDS", "TB3MS", "TB6MS", "GS1", "GS5", "GS10", "TB3SMFFM", "T1YFFM", "T5YFFM", "T10YFFM"],
-        "equities": ["SP500", "CAPE", "SPDIVOR"],
+        # Credit spreads & levels
+        "spreads": ["BAA", "AAA", "COMPAPFF", "AAAFFM", "BAAFFM"],
+        # Rates & curve (policy & term premia)
+        "rates_curve": ["FEDFUNDS", "TB3MS", "GS1", "GS5", "GS10", "TB3SMFFM", "T1YFFM", "T5YFFM", "T10YFFM"],
+        # Volatility & conditions
         "vol_liquidity": ["VIXCLS", "MOVE", "NFCI"],
+        # Equities / Valuation / Leverage
+        "equity_lev": ["SP500", "SPDIVOR", "CAPE", "BUSLOANS", "REALLN", "NONREVSL"],
     },
     "Housing": {
         "activity": ["HOUST", "PERMIT"],
@@ -430,7 +454,7 @@ SUB_BUCKETS = {
     },
     "FX": {
         "usd": ["TWEXAFEGSMTH"],
-        "commodities": ["DCOILWTICO"],
+        "energy": ["DCOILWTICO"],
     },
 }
 
@@ -443,7 +467,7 @@ MIN_SUB_BUCKET_COVERAGE = 1
 # ---------------------------------------------------------------------------
 
 # Lookback window (years) for estimating regime mean/cov
-REGIME_WINDOW_YEARS = 15
+REGIME_WINDOW_YEARS = 25
 
 # Rebalance frequency: 'M' for monthly, 'Q' for quarterly
 REBAL_FREQ = 'Q'
