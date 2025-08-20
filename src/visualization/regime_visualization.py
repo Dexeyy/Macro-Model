@@ -361,7 +361,8 @@ class RegimeVisualization:
             
             plt.tight_layout()
             
-            logger.info("Portfolio comparison visualization created successfully")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Portfolio comparison visualization created successfully")
             return fig
             
         except Exception as e:

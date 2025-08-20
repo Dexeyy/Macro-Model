@@ -6,6 +6,9 @@ template lacks pre-populated tables.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import os
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -16,6 +19,14 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font
 from openpyxl.chart import BarChart, Reference
+# Ensure project root is importable when executed as a script
+try:
+    ROOT = Path(__file__).resolve().parents[2]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+except Exception:
+    pass
+
 try:
     from src.charts.theme_charts import (
         build_growth_sheet,
@@ -24,11 +35,30 @@ try:
         build_credit_sheet,
     )
 except Exception:  # pragma: no cover
-    build_growth_sheet = build_housing_sheet = build_inflation_sheet = build_credit_sheet = None  # type: ignore
+    # One more attempt after adjusting path
+    try:
+        ROOT = Path(__file__).resolve().parents[2]
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from src.charts.theme_charts import (
+            build_growth_sheet,
+            build_housing_sheet,
+            build_inflation_sheet,
+            build_credit_sheet,
+        )
+    except Exception:
+        build_growth_sheet = build_housing_sheet = build_inflation_sheet = build_credit_sheet = None  # type: ignore
 try:
     from config import config as CHART_CFG  # type: ignore
 except Exception:  # pragma: no cover
-    CHART_CFG = object()
+    # Try again with adjusted path
+    try:
+        ROOT = Path(__file__).resolve().parents[2]
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from config import config as CHART_CFG  # type: ignore
+    except Exception:
+        CHART_CFG = object()
 try:
     # Optional: portfolio/dashboard configuration for display
     from config.config import REGIME_WINDOW_YEARS, REBAL_FREQ, TRANSACTION_COST
@@ -41,6 +71,12 @@ try:
 except Exception:  # pragma: no cover - optional import for dashboard extras
     PortfolioConstructor = None  # type: ignore
     OptimizationMethod = None  # type: ignore
+
+# Lightweight helper to compute theme composites from featured data
+try:
+    from src.charts.helpers import theme_composite_from_cfg  # type: ignore
+except Exception:  # pragma: no cover
+    theme_composite_from_cfg = None  # type: ignore
 
 THEME_SHEETS: List[str] = [
     "Growth & Labour",
@@ -188,13 +224,33 @@ def load_data_dump_df(wb) -> Optional[pd.DataFrame]:
 
 def render_plot_trend(theme: str, df: pd.DataFrame, outdir: Path) -> Optional[Path]:
     try:
+        # Ensure a real DatetimeIndex for proper date axis
+        try:
+            if not isinstance(df.index, pd.DatetimeIndex):
+                idx = pd.to_datetime(df.index, errors="coerce")
+                df = df.copy()
+                df.index = idx
+                df = df[df.index.notna()]
+        except Exception:
+            pass
+        # Sort by date
+        try:
+            df = df.sort_index()
+        except Exception:
+            pass
         color = THEME_COLOR.get(theme, "#1f77b4")
         fig, ax = plt.subplots(figsize=(7.4, 3.8))
         # Show full history when short; otherwise show the most recent ~15 years (180 months)
         base = df
         try:
-            if isinstance(df.index, pd.DatetimeIndex) and len(df) > 180:
-                base = df.tail(180)
+            # Show full range if short; otherwise show the most recent ~25 years (300 months)
+            if isinstance(df.index, pd.DatetimeIndex):
+                # Ensure ascending chronology so tail(300) means "latest" 25y
+                df_sorted = df.sort_index()
+                if len(df_sorted) > 300:
+                    base = df_sorted.tail(300)
+                else:
+                    base = df_sorted
         except Exception:
             base = df
         base["ThemeComposite"].plot(ax=ax, color=color, linewidth=1.8, label="Composite")
@@ -357,13 +413,94 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
     if sheetname not in wb.sheetnames:
         return
     ws: Worksheet = wb[sheetname]
-    # Remove any previously inserted images so new renders don't stack
+    # Remove any previously inserted images/charts so new renders don't stack
     try:
         for img in list(getattr(ws, "_images", [])):
             ws._images.remove(img)
     except Exception:
         pass
+    try:
+        for ch in list(getattr(ws, "_charts", [])):
+            ws._charts.remove(ch)
+    except Exception:
+        pass
     df = load_theme_df(wb, sheetname)
+    # Prefer rebuilding the ThemeComposite from featured/monthly data so history is current
+    try:
+        comp_df = None
+        if theme_composite_from_cfg is not None:
+            # Load macro_df (featured preferred, else Data Dump)
+            macro_df = None
+            try:
+                featured_csv = Path("Data/processed/macro_data_featured.csv")
+                if featured_csv.exists():
+                    macro_df = pd.read_csv(featured_csv, index_col=0, parse_dates=[0])
+            except Exception:
+                macro_df = None
+            if macro_df is None:
+                macro_df = load_data_dump_df(wb)
+            if macro_df is not None and not macro_df.empty:
+                key_map = {
+                    "Growth & Labour": "growth",
+                    "Growth": "growth",
+                    "Inflation & Liquidity": "inflation",
+                    "Inflation": "inflation",
+                    "Credit & Risk": "credit",
+                    "Credit": "credit",
+                    "Housing": "housing",
+                    "FX & Commodities": "fx",
+                }
+                tkey = key_map.get(sheetname, None)
+                if tkey:
+                    s = theme_composite_from_cfg(macro_df, CHART_CFG, tkey)
+                    if s is not None and not s.empty:
+                        comp_df = pd.DataFrame({
+                            "ThemeComposite": pd.to_numeric(s, errors="coerce"),
+                            "ThemeComposite_3M_MA": pd.to_numeric(s, errors="coerce").rolling(3, min_periods=1).mean(),
+                        }).dropna(how="all")
+        # Manual fallback for Housing if config composite not available
+        if (comp_df is None or comp_df.empty) and sheetname in ("Housing",):
+            candidates = [
+                "PERMIT","PERMITS","PERMIT1","PERMITNE","PERMITMW","PERMITW",
+                "HOUST","HOUSTNSA","HOUSTF","HOUSTNE","HOUSTMW","HOUSTS","HOUSTW",
+            ]
+            try:
+                used = [c for c in candidates if c in macro_df.columns]
+                # Keyword-based expansion to catch verbose Data Dump headers
+                if macro_df is not None:
+                    lower_map = {str(c).lower(): c for c in macro_df.columns}
+                    for key in ("permit", "houst", "housing start"):
+                        for lc, orig in lower_map.items():
+                            if key in lc and orig not in used:
+                                used.append(orig)
+            except Exception:
+                used = []
+            if used:
+                try:
+                    sub = macro_df[used].apply(pd.to_numeric, errors="coerce")
+                    # z-score per column using full-sample (robust enough for display)
+                    zs = sub.apply(lambda s: (s - s.mean()) / (s.std(ddof=0) or 1.0))
+                    comp = zs.mean(axis=1).dropna()
+                    if not comp.empty:
+                        comp = comp.sort_index()
+                        comp_df = pd.DataFrame({
+                            "ThemeComposite": comp,
+                            "ThemeComposite_3M_MA": comp.rolling(3, min_periods=1).mean(),
+                        })
+                except Exception:
+                    comp_df = None
+        if comp_df is not None and not comp_df.empty:
+            # Ensure a proper DatetimeIndex for consistent date axes
+            try:
+                if not isinstance(comp_df.index, pd.DatetimeIndex):
+                    coerced = pd.to_datetime(comp_df.index, errors="coerce")
+                    if isinstance(coerced, pd.DatetimeIndex):
+                        comp_df.index = coerced
+            except Exception:
+                pass
+            df = comp_df
+    except Exception:
+        pass
     if df is None or df.empty:
         return
     p1 = render_plot_trend(sheetname, df, outdir)
@@ -380,7 +517,7 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
     # falling back to the monthly Data Dump.
     try:
         if build_growth_sheet:
-            # Load macro_df (featured preferred)
+            # Load macro_df (featured preferred), then merge with Data Dump to fill gaps
             macro_df = None
             try:
                 featured_csv = Path("Data/processed/macro_data_featured.csv")
@@ -390,15 +527,29 @@ def build_theme_sheet(wb, sheetname: str, outdir: Path) -> None:
                 macro_df = None
             if macro_df is None:
                 macro_df = monthly
+            else:
+                # Merge with Data Dump (prefer featured, fill missing from monthly)
+                try:
+                    if monthly is not None and not monthly.empty:
+                        macro_df = macro_df.combine_first(monthly)
+                except Exception:
+                    pass
             if macro_df is not None and not macro_df.empty:
+                # Pass the worksheet directly to ensure correct insertion context
+                try:
+                    ws_for_build: Worksheet = wb[sheetname]
+                except Exception:
+                    ws_for_build = ws
+                # Call builders and surface any errors so failures aren't silently skipped
+                theme_df = load_theme_df(wb, sheetname)
                 if sheetname == "Growth & Labour" or sheetname == "Growth":
-                    build_growth_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                    build_growth_sheet(macro_df, ws_for_build, CHART_CFG, sheet_name=sheetname, theme_df=theme_df)
                 elif sheetname == "Inflation & Liquidity" or sheetname == "Inflation":
-                    build_inflation_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                    build_inflation_sheet(macro_df, ws_for_build, CHART_CFG, sheet_name=sheetname, theme_df=theme_df)
                 elif sheetname == "Credit & Risk" or sheetname == "Credit":
-                    build_credit_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                    build_credit_sheet(macro_df, ws_for_build, CHART_CFG, sheet_name=sheetname)
                 elif sheetname == "Housing":
-                    build_housing_sheet(macro_df, wb, CHART_CFG, sheet_name=sheetname)
+                    build_housing_sheet(macro_df, ws_for_build, CHART_CFG, sheet_name=sheetname)
     except Exception:
         pass
 
@@ -767,13 +918,24 @@ def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
     try:
         featured_csv = Path("Data/processed/macro_data_featured.csv")
         macro_df: Optional[pd.DataFrame] = None
+        monthly_df: Optional[pd.DataFrame] = None
         if featured_csv.exists():
             try:
                 macro_df = pd.read_csv(featured_csv, index_col=0, parse_dates=[0])
             except Exception:
                 macro_df = None
+        try:
+            monthly_df = load_data_dump_df(wb)
+        except Exception:
+            monthly_df = None
         if macro_df is None:
-            macro_df = load_data_dump_df(wb)
+            macro_df = monthly_df
+        else:
+            try:
+                if monthly_df is not None and not monthly_df.empty:
+                    macro_df = macro_df.combine_first(monthly_df)
+            except Exception:
+                pass
         if macro_df is not None and not macro_df.empty and build_growth_sheet:
             sheet_growth = "Growth & Labour" if "Growth & Labour" in wb.sheetnames else ("Growth" if "Growth" in wb.sheetnames else THEME_SHEETS[0])
             sheet_housing = "Housing" if "Housing" in wb.sheetnames else THEME_SHEETS[-2]
@@ -827,8 +989,25 @@ def build_inplace(workbook_path: str, out: Optional[str] = None) -> None:
     except Exception:
         pass
     out_path = out or "Output/Macro_Reg_Report_with_category_dashboards.xlsm"
-    wb.save(out_path)
-    print(f"Workbook saved: {out_path}")
+    # Ensure directory exists
+    try:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        wb.save(out_path)
+        print(f"Workbook saved: {out_path}")
+    except PermissionError:
+        # Fallback: file likely open/locked. Save to a timestamped copy.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        alt = Path(out_path)
+        alt_name = f"{alt.stem}_{ts}{alt.suffix}"
+        alt_path = str(alt.with_name(alt_name))
+        try:
+            wb.save(alt_path)
+            print(f"Workbook in use, saved copy instead: {alt_path}")
+        except Exception as e:
+            print(f"Failed to save workbook: {e}")
 
 
 def main():

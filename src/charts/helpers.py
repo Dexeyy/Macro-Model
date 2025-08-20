@@ -204,6 +204,10 @@ def save_fig(fig, outdir: Path, filename: str) -> Path:
     path = outdir / filename
     fig.savefig(path, dpi=140, bbox_inches="tight")
     plt.close(fig)
+    try:
+        print(f"Saved chart: {path}")
+    except Exception:
+        pass
     return path
 
 
@@ -227,7 +231,66 @@ def insert_image(ws: Worksheet, image_path: Path, anchor_cell: str, *, max_width
         except Exception:
             pass
         ws.add_image(img, anchor_cell)
+        try:
+            print(f"Inserted image at {anchor_cell}: {image_path}")
+        except Exception:
+            pass
     except Exception:
         pass
+
+
+def choose_first(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    """Return the first matching column.
+
+    Strategy:
+    - Exact match in order provided
+    - Fallback: case-insensitive substring match
+    """
+    cols = list(df.columns)
+    # Exact
+    for c in candidates:
+        if c in cols:
+            return c
+    # Case-insensitive exact
+    lower_map = {str(col).lower(): col for col in cols}
+    for c in candidates:
+        lc = str(c).lower()
+        if lc in lower_map:
+            return lower_map[lc]
+    # Substring fallback
+    for c in candidates:
+        lc = str(c).lower()
+        for col in cols:
+            if lc in str(col).lower():
+                return col
+    return None
+
+
+def find_series(df: pd.DataFrame, keywords: Sequence[str], *, excludes: Sequence[str] | None = None, min_non_na: int = 12) -> Optional[str]:
+    """Find a column whose name contains any of the keywords (case-insensitive)
+    and has at least min_non_na numeric observations. Exclude names that contain
+    any of the excludes fragments.
+    """
+    if df is None or df.empty:
+        return None
+    excludes = excludes or []
+    for col in df.columns:
+        name = str(col)
+        n = name.lower()
+        if any(k.lower() in n for k in keywords) and not any(x.lower() in n for x in excludes):
+            s = pd.to_numeric(df[col], errors="coerce")
+            if s.notna().sum() >= min_non_na:
+                return col
+    return None
+
+
+def normalize_series(s: pd.Series) -> pd.Series:
+    x = pd.to_numeric(s, errors="coerce")
+    if len(x) == 0:
+        return x
+    base = x.dropna()
+    if base.empty:
+        return x
+    return x / (base.iloc[0] if base.iloc[0] != 0 else 1.0)
 
 

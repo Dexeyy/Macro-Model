@@ -715,10 +715,10 @@ def fit_regimes(
     # Note: `mode` is currently informational for downstream callers (e.g., CLI),
     # as this function receives a fully prepared DataFrame. Default behavior unchanged.
     cfg = get_regimes_config()
-    selected = cfg.get("models") or ["rule", "kmeans", "gmm", "hmm"]
-    # Ensure GMM is available for smoke tests and parity with legacy defaults
-    if "gmm" not in selected:
-        selected = list(selected) + ["gmm"]
+    # Keep only KMeans and GMM regardless of YAML to simplify runs
+    selected = [m for m in (cfg.get("models") or ["kmeans", "gmm"]) if m in ("kmeans", "gmm")]
+    if not selected:
+        selected = ["kmeans", "gmm"]
 
     # Feature selection: bundle overrides default; else prefer PC_ then F_ ...
     data = data.replace([np.inf, -np.inf], np.nan)
@@ -749,17 +749,8 @@ def fit_regimes(
 
     # New pluggable classifier path (rule, kmeans, hmm, supervised) alongside legacy models
     registry = {
-        "hmm": HMMModel(cfg),
         "gmm": GMMModel(n_components=n_regimes, cfg=cfg),
         "kmeans": KMeansModel(n_clusters=n_regimes, cfg=cfg),
-        "rule": RuleModel(cfg),
-        "hsmm": HSMMModel(cfg),
-        "msdyn": MSDynModel(cfg),
-        # bridge to new classifiers for explicit requests
-        "hmm_new": None,
-        "kmeans_new": None,
-        "rule_new": None,
-        "supervised": None,
     }
 
     outputs: Dict[str, pd.DataFrame] = {}

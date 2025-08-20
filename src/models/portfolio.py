@@ -27,11 +27,7 @@ import warnings
 # Suppress optimization warnings for cleaner output
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Set up logging (quiet by default; respect application root config)
 logger = logging.getLogger(__name__)
 
 class OptimizationMethod(Enum):
@@ -93,7 +89,6 @@ class PortfolioConstructor:
         self.last_weights: Optional[pd.Series] = None
         # Internal flag to control whether mean passed to tangency/min-var is already excess
         self._assume_mean_is_excess: bool = False
-        logger.info("Initialized PortfolioConstructor")
 
     # ================= Mean-Covariance Estimation ======================
     def estimate_mean_cov(
@@ -429,7 +424,8 @@ class PortfolioConstructor:
             ub = np.array([b[1] for b in bounds], dtype=float)
             try:
                 self._preflight_feasible(lb, ub, self.constraints.max_positions)
-                logger.info("Preflight bounds: lb_sum=%.3f ub_sum=%.3f max_pos=%s", float(lb.sum()), float(ub.sum()), str(self.constraints.max_positions))
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Preflight bounds: lb_sum=%.3f ub_sum=%.3f max_pos=%s", float(lb.sum()), float(ub.sum()), str(self.constraints.max_positions))
             except Exception as exc:
                 logger.error("Bounds infeasible: %s", exc)
                 # Deterministic fallback path
@@ -1238,8 +1234,9 @@ def compute_dynamic_regime_portfolio(
                 'ub_sum': float(1.0),
                 'max_positions': int(pc.constraints.max_positions) if pc.constraints.max_positions else 0,
             }
-            logger.info("%s | reg=%s n_obs=%d pos_excess=%d med_excess=%.6f method=%s used_cash=%s blend=%s",
-                        dt.strftime('%Y-%m-%d'), str(cur_reg), int(used_window_len), int(pos_excess_count), float(median_excess_mu), str(method_used), str(bool(used_cash_flag)), str(bool(blending_used)))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("%s | reg=%s n_obs=%d pos_excess=%d med_excess=%.6f method=%s used_cash=%s blend=%s",
+                             dt.strftime('%Y-%m-%d'), str(cur_reg), int(used_window_len), int(pos_excess_count), float(median_excess_mu), str(method_used), str(bool(used_cash_flag)), str(bool(blending_used)))
         else:
             port_r.loc[dt] = float(rts.loc[dt].dot(last_w))
         prev_reg = cur_reg

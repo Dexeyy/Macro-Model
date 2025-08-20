@@ -96,7 +96,8 @@ def save_data(data, file_path, file_format='csv'):
         if file_format == 'csv':
             if isinstance(data, pd.DataFrame):
                 data.to_csv(file_path)
-                logger.info(f"Saved DataFrame to {file_path}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Saved DataFrame to {file_path}")
                 return True
             else:
                 logger.error(f"Data is not a DataFrame, cannot save as CSV")
@@ -105,7 +106,8 @@ def save_data(data, file_path, file_format='csv'):
         elif file_format == 'json':
             if isinstance(data, pd.DataFrame):
                 data.to_json(file_path)
-                logger.info(f"Saved DataFrame to {file_path}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Saved DataFrame to {file_path}")
                 return True
             elif isinstance(data, dict):
                 with open(file_path, 'w') as f:
