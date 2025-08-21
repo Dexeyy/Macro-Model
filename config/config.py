@@ -198,6 +198,8 @@ FRED_ALIASES = {
     # Helpful shorthands
     'MORTGx': 'MORTGAGE30US',
     'HPIx': 'USSTHPI',
+    # Canonical mapping where common name differs from FRED code
+    'NAHB': 'HMI',
 }
 
 # Transformation code map (FRED-MD tcode): 1=level, 2=diff, 4=diff4, 5=log, 6=diff(log), 7=diff2(log)

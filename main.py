@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 import argparse
+from pathlib import Path
 
 # Import configuration
 import sys
@@ -67,6 +68,24 @@ def fetch_and_process_data(start_override: str | None = None, end_override: str 
         start_date = start_override or config.START_DATE
         end_date = end_override or config.END_DATE
         macro_data_raw = fetch_fred_series(config.FRED_SERIES, start_date, end_date)
+        # Ensure critical series from config are present – fetch any missing/empty ones
+        try:
+            missing = []
+            for code in config.FRED_SERIES.keys():
+                if code not in macro_data_raw.columns:
+                    missing.append(code)
+                else:
+                    s = pd.to_numeric(macro_data_raw[code], errors='coerce')
+                    if s.notna().sum() == 0:
+                        missing.append(code)
+            if missing:
+                extra_map = {k: k for k in missing}
+                logger.info(f"Backfilling missing FRED series: {missing}")
+                extra = fetch_fred_series(extra_map, start_date, end_date)
+                if extra is not None and not extra.empty:
+                    macro_data_raw = macro_data_raw.combine_first(extra)
+        except Exception as _:
+            logger.warning("Missing-series backfill skipped due to an error", exc_info=True)
         # Apply FRED-MD transformations if available
         from src.data.fetchers import apply_fredmd_tcodes
         macro_data_raw = apply_fredmd_tcodes(macro_data_raw)
@@ -106,6 +125,13 @@ def fetch_and_process_data(start_override: str | None = None, end_override: str 
 
         # Fallback to building advanced features in-process if no artifact was found
         macro_data_featured = chosen if chosen is not None else create_advanced_features(base_features, mode=run_mode or "retro")
+        # Guarantee that configured base FRED series are carried through to the featured CSV
+        try:
+            needed_codes = [c for c in config.FRED_SERIES.keys() if c in base_features.columns]
+            if needed_codes:
+                macro_data_featured = macro_data_featured.combine_first(base_features[needed_codes])
+        except Exception:
+            logger.warning("Failed to ensure base FRED series presence in featured file", exc_info=True)
         diagnose_dataframe(macro_data_featured, "macro_data_featured")
 
         # Persist a CSV view for downstream CLI/tools to read consistently
@@ -190,8 +216,8 @@ def analyze_regime_performance(macro_data, asset_returns):
     
     results = {}
     
-    # Analyze for available regimes in the unified output
-    candidate_cols = [c for c in ['Rule', 'HMM', 'KMeans', 'GMM', 'HSMM', 'Ensemble_Regime', 'Regime_Ensemble'] if c in macro_data.columns]
+    # Analyze for available regimes in the unified output (keep only KMeans and GMM)
+    candidate_cols = [c for c in ['KMeans', 'GMM'] if c in macro_data.columns]
     for regime_col in candidate_cols:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
@@ -260,8 +286,8 @@ def create_visualizations(macro_data, analysis_results):
         logger.error("No macro data available for visualizations")
         return
     
-    # Create regime timeline plots for available columns
-    for regime_col in [c for c in ['Rule', 'HMM', 'GMM', 'KMeans', 'HSMM', 'Ensemble_Regime', 'Regime_Ensemble'] if c in macro_data.columns]:
+    # Create regime timeline plots for available columns (keep only KMeans and GMM)
+    for regime_col in [c for c in ['KMeans', 'GMM'] if c in macro_data.columns]:
         if regime_col not in macro_data.columns:
             logger.warning(f"Regime column {regime_col} not found in macro_data")
             continue
@@ -388,22 +414,33 @@ def create_portfolios(analysis_results):
             # Plot portfolio comparison
             try:
                 plt.figure(figsize=(12, 8))
-                
                 # Calculate cumulative returns
                 cum_equal_weight = (1 + equal_weight_returns).cumprod()
                 cum_regime_based = (1 + regime_portfolio['portfolio_return']).cumprod()
-                
+
                 plt.plot(cum_equal_weight, label='Equal Weight')
                 plt.plot(cum_regime_based, label='Regime-Based')
-                
+
                 plt.title(f'Portfolio Comparison ({regime_col})', fontsize=14)
                 plt.xlabel('Date', fontsize=12)
                 plt.ylabel('Cumulative Return', fontsize=12)
                 plt.legend()
                 plt.grid(True, alpha=0.3)
-                
-                plt.savefig(os.path.join(config.OUTPUT_DIR, f'portfolio_comparison_{regime_col}.png'))
-                plt.close()
+
+                # Robust save
+                out_dir = Path(config.OUTPUT_DIR)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / f'portfolio_comparison_{regime_col}.png'
+                try:
+                    plt.savefig(str(out_path))
+                except Exception:
+                    # Fallback to absolute path and sanitized filename
+                    safe_name = f'portfolio_comparison_{str(regime_col).replace(" ", "_").replace(":", "-")}.png'
+                    alt_path = Path.cwd() / 'Output' / safe_name
+                    alt_path.parent.mkdir(parents=True, exist_ok=True)
+                    plt.savefig(str(alt_path))
+                finally:
+                    plt.close()
             except Exception as e:
                 logger.error(f"Error plotting portfolio comparison: {e}")
         

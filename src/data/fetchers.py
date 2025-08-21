@@ -37,7 +37,8 @@ def _canonicalize_series_dict(series_dict: dict) -> dict:
     for k, v in series_dict.items():
         # If v looks like a FRED code (uppercase letters/numbers/underscore), treat as code
         if isinstance(v, str) and v.replace('_', '').isalnum() and v.upper() == v:
-            code = v
+            # Map code via aliases when provided (e.g., NAHB -> HMI)
+            code = aliases.get(v, v)
             label = k
         else:
             # Otherwise, k is the code and label; map aliases
