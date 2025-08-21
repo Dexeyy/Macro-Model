@@ -7,7 +7,7 @@ import requests
 from datetime import datetime
 from fredapi import Fred
 import yfinance as yf
-from config import config as cfg  # access FRED_ALIASES and TCODE_MAP
+from config import config as cfg  # access FRED_ALIASES/TCODE_MAP/FRED_FALLBACKS
 
 # Set up logging
 logging.basicConfig(
@@ -75,6 +75,9 @@ def fetch_fred_series(series_dict, start_date, end_date):
     except Exception:
         pass
     
+    # Known fallbacks per config
+    fallback_map = getattr(cfg, 'FRED_FALLBACKS', {}) or {}
+
     for label, code in series_dict.items():
         # Per-series retry with exponential backoff for rate limits and transient errors
         max_tries = 5
@@ -110,6 +113,25 @@ def fetch_fred_series(series_dict, start_date, end_date):
         if got is not None:
             data_list.append(got)
         else:
+            # Try fallbacks if available
+            try:
+                fb_codes = fallback_map.get(label) or fallback_map.get(code) or []
+                for fb in fb_codes:
+                    try:
+                        logger.info(f"Trying fallback {fb} for {label}...")
+                        s2 = fred.get_series(fb, observation_start=start_date, observation_end=end_date)
+                        if s2 is not None and not s2.empty:
+                            data_list.append(s2.rename(label))
+                            logger.warning(f"Used fallback {fb} for {label}")
+                            got = s2
+                            break
+                    except Exception as fe:
+                        last_exc = fe
+                        continue
+                if got is not None:
+                    continue
+            except Exception:
+                pass
             # Special-case fallback: MOVE via Stooq if FRED unavailable
             if code == "MOVE" or label == "MOVE":
                 try:

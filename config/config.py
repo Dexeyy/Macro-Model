@@ -200,6 +200,19 @@ FRED_ALIASES = {
     'HPIx': 'USSTHPI',
     # Canonical mapping where common name differs from FRED code
     'NAHB': 'HMI',
+    # Case–Shiller SA/NSA interop (labels you may use elsewhere)
+    'CSUSHPISA': 'CSUSHPISA',
+    'CSUSHPINSA': 'CSUSHPINSA',
+    # FHFA SA/NSA interop
+    'USSTHPISA': 'USSTHPISA',
+    'USSTHPI': 'USSTHPI',
+    # Optional convenience labels you might reference
+    'PERMIT1': 'PERMIT1',
+    'PERMIT5F': 'PERMIT5F',
+    'PERMITNSA': 'PERMITNSA',
+    'HOUST1F': 'HOUST1F',
+    'HOUST5F': 'HOUST5F',
+    'HOUSTNSA': 'HOUSTNSA',
 }
 
 # Transformation code map (FRED-MD tcode): 1=level, 2=diff, 4=diff4, 5=log, 6=diff(log), 7=diff2(log)
@@ -252,6 +265,28 @@ TCODE_MAP = {
 TCODE_MAP.update({
     "DGS2": 2, "DGS5": 2, "DGS10": 2, "T10Y2Y": 1,
 })
+
+# Transform codes for fallback/interop IDs
+TCODE_MAP.update({
+    'HOUST1F': 4, 'HOUST5F': 4, 'HOUSTNSA': 4,
+    'PERMIT1': 4, 'PERMIT5F': 4, 'PERMITNSA': 4,
+    'CSUSHPISA': 6, 'USSTHPISA': 6,
+    'MORTGAGE15US': 1,
+    'HMI': 1,
+})
+
+# Explicit fallback order per canonical ID
+FRED_FALLBACKS = {
+    'HOUST':      ['HOUST1F', 'HOUST5F', 'HOUSTNSA', 'HOUSTNE', 'HOUSTMW', 'HOUSTS', 'HOUSTW'],
+    'PERMIT':     ['PERMIT1', 'PERMIT5F', 'PERMITNSA', 'PERMITNE', 'PERMITMW', 'PERMITS', 'PERMITW'],
+    'CSUSHPINSA': ['CSUSHPISA', 'USSTHPI', 'USSTHPISA'],
+    'USSTHPI':    ['USSTHPISA', 'CSUSHPINSA', 'CSUSHPISA'],
+    'MORTGAGE30US': ['MORTGAGE15US'],
+    'HMI': [],
+    'HSN1F': [],
+    'EXHOSLUSM495S': [],
+    'MSACSR': [],
+}
 
 # Asset tickers
 ASSET_TICKERS = {
